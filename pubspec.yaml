@@ -1,0 +1,51 @@
+name: futuragest_mobile
+description: "FuturaGest mobile app — workforce management for Colombian field teams."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # HTTP client with interceptors
+  dio: ^5.8.0
+
+  # State management
+  flutter_riverpod: ^2.6.1
+
+  # Secure token / deviceId storage
+  flutter_secure_storage: ^9.2.4
+
+  # UUID v4 for stable deviceId and clientRef generation
+  uuid: ^4.5.1
+
+  # GPS position capture for check-in / check-out
+  geolocator: ^13.0.2
+
+  # On-screen signature pad → PNG bytes
+  signature: ^6.3.0
+
+  # Biometric authentication (fingerprint / face) — local gate before fichaje
+  local_auth: ^2.3.0
+
+  # Network connectivity detection + reconnect events for offline queue
+  connectivity_plus: ^6.1.4
+
+  # Offline queue persistence (SQLite)
+  sqflite: ^2.4.2
+  path: ^1.9.1
+  path_provider: ^2.1.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
