@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "539473986785",
+    "project_id": "futuragest-01",
+    "storage_bucket": "futuragest-01.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:539473986785:android:d252e51c48aa84661fe3a0",
+        "android_client_info": {
+          "package_name": "co.futuragest.futuragest_mobile"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCklePiG-YKwmlE-lJDHnh6eeQOBQXFhHc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:539473986785:android:5986fed74c26a9e51fe3a0",
+        "android_client_info": {
+          "package_name": "com.futuragest"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCklePiG-YKwmlE-lJDHnh6eeQOBQXFhHc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

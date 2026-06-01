@@ -16,6 +16,34 @@ abstract interface class AuthRepository {
 
   /// Fetches the authenticated user's profile using the stored access token.
   Future<UserProfile> getMe();
+
+  /// Registers (or updates) the FCM push token for the caller's current device
+  /// session. The device is resolved from the JWT — never from the body.
+  ///
+  /// [pushToken] is the FCM registration token string.
+  /// [pushPlatform] is optional ("android" | "ios").
+  ///
+  /// Calls POST /auth/push-token → 204.
+  /// Throws [AuthException] on 401 or 400.
+  ///
+  /// TODO(push): next slice — obtain the real FCM token via firebase_messaging
+  ///             and call this from a post-login hook.
+  Future<void> registerPushToken({
+    required String pushToken,
+    String? pushPlatform,
+  });
+
+  /// Changes the authenticated user's password.
+  ///
+  /// [oldPassword] is the current password (field name confirmed from backend DTO).
+  /// [newPassword] is the new password (min 8 chars enforced by backend).
+  ///
+  /// Calls POST /auth/change-password → 200 { message }.
+  /// Throws [AuthException] on 401 (wrong current password) or 400 (invalid new).
+  Future<void> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  });
 }
 
 /// Domain exception for authentication failures.

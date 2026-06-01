@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../application/login_controller.dart';
 import '../application/login_state.dart';
+import 'change_password_screen.dart';
 import 'home_screen.dart';
 
 /// Login screen — first thing the user sees.
@@ -41,13 +42,16 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
     final state = ref.watch(loginControllerProvider);
     final theme = Theme.of(context);
 
-    // Navigate to home when login + profile fetch succeed.
+    // Navigate after login succeeds.
+    // If mustChangePassword == true → go to ChangePasswordScreen (mandatory).
+    // Otherwise → go directly to HomeScreen.
     ref.listen<LoginState>(loginControllerProvider, (previous, next) {
       if (next is LoginSuccess) {
+        final destination = next.profile.mustChangePassword
+            ? ChangePasswordScreen(profile: next.profile)
+            : HomeScreen(profile: next.profile);
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(
-            builder: (_) => HomeScreen(profile: next.profile),
-          ),
+          MaterialPageRoute<void>(builder: (_) => destination),
         );
       }
     });

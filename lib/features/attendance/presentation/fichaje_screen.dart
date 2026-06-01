@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:signature/signature.dart';
 
+import '../../../features/novedades/presentation/novedad_form_screen.dart';
 import '../application/fichaje_controller.dart';
 import '../application/fichaje_state.dart';
+import '../domain/attendance_record.dart';
 import '../domain/operario.dart';
 
 /// Full fichaje flow for a single operario.
@@ -291,7 +293,7 @@ class _CheckOutView extends StatelessWidget {
     required this.onCheckOut,
   });
 
-  final dynamic record;
+  final AttendanceRecord record;
   final VoidCallback onCheckOut;
 
   @override
@@ -373,11 +375,15 @@ class _BusyView extends StatelessWidget {
 class _DoneView extends StatelessWidget {
   const _DoneView({required this.record});
 
-  final dynamic record;
+  final AttendanceRecord record;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
+    // The novedad form requires a real server ID. When the check-out was
+    // captured offline (id == ''), the button is disabled with a note.
+    final hasServerId = record.id.isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -402,7 +408,36 @@ class _DoneView extends StatelessWidget {
           ),
           textAlign: TextAlign.center,
         ),
-        const SizedBox(height: 40),
+        const SizedBox(height: 32),
+        // ── Novedad shortcut ─────────────────────────────────────────────
+        FilledButton.icon(
+          onPressed: hasServerId
+              ? () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) =>
+                          NovedadFormScreen(attendanceId: record.id),
+                    ),
+                  );
+                }
+              : null,
+          icon: const Icon(Icons.more_time),
+          label: const Text('Registrar horas extra'),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 16),
+          ),
+        ),
+        if (!hasServerId) ...[
+          const SizedBox(height: 6),
+          Text(
+            'Disponible una vez que la asistencia se sincronice.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.secondary,
+            ),
+            textAlign: TextAlign.center,
+          ),
+        ],
+        const SizedBox(height: 12),
         OutlinedButton.icon(
           onPressed: () => Navigator.of(context).pop(),
           icon: const Icon(Icons.arrow_back),

@@ -1,16 +1,45 @@
+import 'dart:developer' as dev;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/push/push_messaging_service.dart';
 import '../../../features/attendance/presentation/operario_list_screen.dart';
+import '../../../features/novedades/presentation/lider_novedades_screen.dart';
+import '../../../features/novedades/presentation/novedades_list_screen.dart';
 import '../application/auth_providers.dart';
 import '../domain/user_profile.dart';
 
-/// Minimal home screen shown after a successful login.
-/// Displays email + role to prove the /auth/me round-trip works.
-class HomeScreen extends ConsumerWidget {
+/// Home screen shown after a successful login.
+/// Triggers FCM push-token registration on first mount (post-auth hook).
+class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key, required this.profile});
 
   final UserProfile profile;
+
+  @override
+  ConsumerState<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends ConsumerState<HomeScreen> {
+  @override
+  void initState() {
+    super.initState();
+    // Initialize FCM after authentication is complete. Non-blocking and
+    // failure-safe — a push failure must never break the core app flow.
+    _initPush();
+  }
+
+  Future<void> _initPush() async {
+    try {
+      await ref.read(pushMessagingServiceProvider).initialize();
+    } catch (e) {
+      dev.log(
+        '[HomeScreen] Push initialization failed (non-fatal): $e',
+        name: 'push',
+      );
+    }
+  }
 
   String _roleLabel(UserRole role) {
     switch (role) {
@@ -30,8 +59,9 @@ class HomeScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final profile = widget.profile;
 
     return Scaffold(
       appBar: AppBar(
@@ -80,24 +110,7 @@ class HomeScreen extends ConsumerWidget {
                   color: theme.colorScheme.secondary,
                 ),
               ),
-              if (profile.mustChangePassword) ...[
-                const SizedBox(height: 16),
-                // TODO(next-slice): Navigate to ChangePasswordScreen
-                // when mustChangePassword == true.
-                Card(
-                  color: theme.colorScheme.errorContainer,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Text(
-                      'Debe cambiar su contraseña antes de continuar.',
-                      style: TextStyle(
-                        color: theme.colorScheme.onErrorContainer,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-              // Attendance entry point — only shown for SUPERVISOR role.
+              // Attendance + novedades entry points — only shown for SUPERVISOR role.
               if (profile.role == UserRole.supervisor) ...[
                 const SizedBox(height: 32),
                 FilledButton.icon(
@@ -110,6 +123,46 @@ class HomeScreen extends ConsumerWidget {
                   },
                   icon: const Icon(Icons.assignment_ind),
                   label: const Text('Tomar asistencia'),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 16,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const NovedadesListScreen(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.schedule),
+                  label: const Text('Mis novedades'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 16,
+                    ),
+                  ),
+                ),
+              ],
+              // Novedades approval — shown for LIDER_OPERATIVO and SYSTEM_ADMIN.
+              if (profile.role == UserRole.liderOperativo ||
+                  profile.role == UserRole.systemAdmin) ...[
+                const SizedBox(height: 32),
+                FilledButton.icon(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const LiderNovedadesScreen(),
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.task_alt),
+                  label: const Text('Novedades pendientes'),
                   style: FilledButton.styleFrom(
                     padding: const EdgeInsets.symmetric(
                       horizontal: 32,
