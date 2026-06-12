@@ -10,6 +10,6 @@ class AppConfig {
 
   static const String apiBaseUrl = String.fromEnvironment(
     'API_BASE_URL',
-    defaultValue: 'http://localhost:3001',
+    defaultValue: 'http://futuragest-backend-bqvz2b-c0b975-5-252-52-113.sslip.io',
   );
 }
