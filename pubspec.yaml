@@ -28,8 +28,8 @@ dependencies:
   # GPS position capture for check-in / check-out
   geolocator: ^13.0.2
 
-  # On-screen signature pad → PNG bytes
-  signature: ^6.3.0
+  # Camera photo capture for check-in / check-out operario photo
+  image_picker: ^1.1.2
 
   # Biometric authentication (fingerprint / face) — local gate before fichaje
   local_auth: ^2.3.0
@@ -42,6 +42,9 @@ dependencies:
   path: ^1.9.1
   path_provider: ^2.1.5
 
+  # Fonts
+  google_fonts: ^6.2.1
+
   # Firebase — push notifications (Android; iOS out of scope for now)
   firebase_core: ^3.13.1
   firebase_messaging: ^15.2.5
@@ -50,6 +53,17 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.3
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/images/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/isotipo.png"
+  min_sdk_android: 21
+  web:
+    generate: false

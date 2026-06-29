@@ -5,7 +5,8 @@ enum NovedadStatus {
   rejected,
 }
 
-/// Domain entity representing a supervisor overtime record (novedad de horas extra).
+/// Domain entity representing a novedad — can be overtime (HORAS_EXTRA) or
+/// late arrival (LLEGADA_TARDE), discriminated by [tipoNovedad].
 ///
 /// [horasExtra] is kept as a string because the backend serialises Prisma
 /// Decimal as a string (e.g. "2.5"). Parse to double only for display/validation.
@@ -22,6 +23,8 @@ class Novedad {
     this.approvedByUserId,
     this.decidedAt,
     this.clientRef,
+    this.tipoNovedad,
+    this.minutosTarde,
   });
 
   /// Server-assigned primary key.
@@ -52,6 +55,12 @@ class Novedad {
 
   /// Client-generated uuid v4 for idempotency (same pattern as fichaje).
   final String? clientRef;
+
+  /// Tipo de novedad: 'HORAS_EXTRA' or 'LLEGADA_TARDE'. Default HORAS_EXTRA.
+  final String? tipoNovedad;
+
+  /// Minutes late (for LLEGADA_TARDE novedades).
+  final int? minutosTarde;
 
   /// Parses [horasExtra] string to a double for display.
   /// Returns null if the string is not a valid number.

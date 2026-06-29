@@ -95,20 +95,28 @@ class NovedadRepositoryImpl implements NovedadRepository {
   // ── Approve novedad ────────────────────────────────────────────────────────
 
   @override
-  Future<void> approveNovedad(String id) async {
-    await _decideNovedad(id, 'approve');
+  Future<void> approveNovedad(String id, {String? verification}) async {
+    await _decideNovedad(id, 'approve', verification: verification);
   }
 
   // ── Reject novedad ─────────────────────────────────────────────────────────
 
   @override
-  Future<void> rejectNovedad(String id) async {
-    await _decideNovedad(id, 'reject');
+  Future<void> rejectNovedad(String id, {String? verification}) async {
+    await _decideNovedad(id, 'reject', verification: verification);
   }
 
-  Future<void> _decideNovedad(String id, String action) async {
+  Future<void> _decideNovedad(
+    String id,
+    String action, {
+    String? verification,
+  }) async {
     try {
-      await dio.patch<void>('/novedades/$id/$action');
+      // AUDIT LABEL ONLY — no authorization logic may depend on this field.
+      await dio.patch<void>(
+        '/novedades/$id/$action',
+        data: verification != null ? {'verification': verification} : null,
+      );
     } on DioException catch (e) {
       final status = e.response?.statusCode;
       final body = e.response?.data;

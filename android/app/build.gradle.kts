@@ -20,7 +20,8 @@ android {
         applicationId = "co.futuragest.futuragest_mobile"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion // firebase_messaging requires >= 21; matches flutter.minSdkVersion default
+        // Explicit minSdk: firebase_messaging requires API >= 21.
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

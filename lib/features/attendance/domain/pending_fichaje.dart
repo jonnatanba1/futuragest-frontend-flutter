@@ -4,22 +4,35 @@ import 'gps_position.dart';
 ///
 /// Transitions (happy path):
 ///   pendingCheckIn
-///     → checkedInPendingSignature   (check-in POST succeeded, server id recovered)
-///     → signedPendingCheckOut       (signature POST succeeded)
-///     → completed                   (check-out POST succeeded)
+///     → checkedIn          (check-in POST succeeded, server id recovered)
+///     → ingresoComplete    (entry photo uploaded)
+///     → salidaSigned       (exit photo uploaded)
+///     → completed          (check-out POST succeeded)
 ///
-/// Any step can transition to [failed].
+/// ingresoComplete is a RESTING state: the row stays here until the salida
+/// phase is captured (hours later in the day).
+///
+/// Any step can transition to [failed] on a non-transient error.
+///
+/// NOTE: The Dart symbol [salidaSigned] is intentionally preserved because
+/// the string value 'salidaSigned' is persisted in SQLite rows. Renaming the
+/// persisted value would break existing queue rows on upgrade.
 enum FichajeQueueStatus {
   /// Check-in has not been POSTed yet (or the POST failed and needs retry).
   pendingCheckIn,
 
-  /// Check-in succeeded; server ID stored. Waiting for signature upload.
-  checkedInPendingSignature,
+  /// Check-in succeeded; server ID stored. Waiting for entry photo upload.
+  checkedIn,
 
-  /// Signature uploaded. Ready for check-out POST.
-  signedPendingCheckOut,
+  /// Entry (ingreso) photo uploaded. Resting until salida is captured.
+  ingresoComplete,
 
-  /// All three steps completed successfully on the backend.
+  /// Exit (salida) photo uploaded. Ready for check-out POST.
+  /// The persisted string value 'salidaSigned' is kept stable for backward
+  /// compatibility with existing SQLite rows from schema v3.
+  salidaSigned,
+
+  /// All steps completed successfully on the backend.
   completed,
 
   /// A non-recoverable error occurred.
@@ -41,13 +54,16 @@ class PendingFichaje {
     required this.checkInCapturedAt,
     required this.checkInGps,
     required this.status,
-    this.signaturePngPath,
+    this.checkInPhotoPath,
+    this.checkOutPhotoPath,
     this.checkOutClientRef,
     this.checkOutCapturedAt,
     this.checkOutGps,
     this.serverAttendanceId,
     this.failureReason,
     this.createdAt,
+    this.checkInVerification,
+    this.checkOutVerification,
   });
 
   /// Auto-incremented local primary key (SQLite row ID).
@@ -69,11 +85,17 @@ class PendingFichaje {
   final DateTime checkInCapturedAt;
   final GpsPosition checkInGps;
 
-  // ── Signature ──────────────────────────────────────────────────────────────
+  // ── Ingreso (entry) photo ──────────────────────────────────────────────────
 
-  /// Absolute path to the signature PNG file in app documents directory.
-  /// Null until the supervisor captures the signature.
-  final String? signaturePngPath;
+  /// Absolute path to the entry photo file in app documents directory.
+  /// Null until the supervisor captures the photo at ingreso.
+  final String? checkInPhotoPath;
+
+  // ── Salida (exit) photo ────────────────────────────────────────────────────
+
+  /// Absolute path to the exit photo file in app documents directory.
+  /// Null until the supervisor captures the photo at salida.
+  final String? checkOutPhotoPath;
 
   // ── Check-out ──────────────────────────────────────────────────────────────
 
@@ -97,14 +119,28 @@ class PendingFichaje {
   /// UTC timestamp when this record was first enqueued.
   final DateTime? createdAt;
 
+  // ── Audit: verification method (AUDIT LABEL ONLY) ──────────────────────────
+  // No authorization logic may depend on these fields.
+
+  /// Audit label for the check-in biometric confirmation method.
+  /// 'BIOMETRIC' | 'DEVICE_CREDENTIAL' | 'NONE' | null (legacy rows).
+  final String? checkInVerification;
+
+  /// Audit label for the check-out biometric confirmation method.
+  /// 'BIOMETRIC' | 'DEVICE_CREDENTIAL' | 'NONE' | null (legacy rows).
+  final String? checkOutVerification;
+
   PendingFichaje copyWith({
-    String? signaturePngPath,
+    String? checkInPhotoPath,
+    String? checkOutPhotoPath,
     String? checkOutClientRef,
     DateTime? checkOutCapturedAt,
     GpsPosition? checkOutGps,
     String? serverAttendanceId,
     FichajeQueueStatus? status,
     String? failureReason,
+    String? checkInVerification,
+    String? checkOutVerification,
   }) {
     return PendingFichaje(
       localId: localId,
@@ -114,7 +150,8 @@ class PendingFichaje {
       clientRef: clientRef,
       checkInCapturedAt: checkInCapturedAt,
       checkInGps: checkInGps,
-      signaturePngPath: signaturePngPath ?? this.signaturePngPath,
+      checkInPhotoPath: checkInPhotoPath ?? this.checkInPhotoPath,
+      checkOutPhotoPath: checkOutPhotoPath ?? this.checkOutPhotoPath,
       checkOutClientRef: checkOutClientRef ?? this.checkOutClientRef,
       checkOutCapturedAt: checkOutCapturedAt ?? this.checkOutCapturedAt,
       checkOutGps: checkOutGps ?? this.checkOutGps,
@@ -122,6 +159,8 @@ class PendingFichaje {
       status: status ?? this.status,
       failureReason: failureReason ?? this.failureReason,
       createdAt: createdAt,
+      checkInVerification: checkInVerification ?? this.checkInVerification,
+      checkOutVerification: checkOutVerification ?? this.checkOutVerification,
     );
   }
 }

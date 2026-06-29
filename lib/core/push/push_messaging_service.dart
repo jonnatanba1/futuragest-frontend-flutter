@@ -1,11 +1,15 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:developer' as dev;
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../features/auth/application/auth_providers.dart';
 import '../../features/auth/application/push_token_service.dart';
 import '../../features/novedades/presentation/lider_novedades_screen.dart';
+import '../storage/token_storage.dart';
 
 // ── Background handler ───────────────────────────────────────────────────────
 // Must be a top-level function and annotated so the Dart VM keeps it alive
@@ -42,14 +46,36 @@ final GlobalKey<NavigatorState> pushNavigatorKey =
 /// Call [initialize] once after Firebase.initializeApp() and after the user
 /// is authenticated (so the PushTokenService can call POST /auth/push-token).
 class PushMessagingService {
-  PushMessagingService(this._pushTokenService);
+  PushMessagingService(this._pushTokenService, this._tokenStorage);
 
   final PushTokenService _pushTokenService;
+  final TokenStorage _tokenStorage;
+
+  /// Guards against duplicate initialization (e.g. logout + login mounts a new
+  /// HomeScreen, which would otherwise attach a second set of FCM listeners and
+  /// produce double SnackBars).
+  bool _initialized = false;
+
+  // Stored subscriptions so [dispose] can cancel them and prevent leaks /
+  // duplicate listeners across re-initialization.
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedAppSub;
+  StreamSubscription<String>? _onTokenRefreshSub;
 
   /// Wire up all FCM listeners and register the token with the backend.
   ///
-  /// Safe to call multiple times — subsequent calls are no-ops if already set.
+  /// Idempotent — subsequent calls are no-ops while already initialized. Call
+  /// [dispose] before re-initializing if you need a fresh set of listeners.
   Future<void> initialize() async {
+    if (_initialized) {
+      dev.log(
+        '[PushMessagingService] initialize() skipped — already initialized.',
+        name: 'push',
+      );
+      return;
+    }
+    _initialized = true;
+
     // 1. Register the top-level background handler.
     FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
@@ -60,15 +86,17 @@ class PushMessagingService {
     await _fetchAndRegisterToken();
 
     // 4. Re-register on token rotation.
-    FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
+    _onTokenRefreshSub =
+        FirebaseMessaging.instance.onTokenRefresh.listen((newToken) {
       _safeRegister(newToken);
     });
 
     // 5. Foreground message → SnackBar heads-up.
-    FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
+    _onMessageSub = FirebaseMessaging.onMessage.listen(_handleForegroundMessage);
 
     // 6. Background tap (app was in background, user tapped notification).
-    FirebaseMessaging.onMessageOpenedApp.listen(_handleMessageTap);
+    _onMessageOpenedAppSub =
+        FirebaseMessaging.onMessageOpenedApp.listen(_handleMessageTap);
 
     // 7. Terminated tap (app was killed, opened via notification).
     final initial = await FirebaseMessaging.instance.getInitialMessage();
@@ -78,6 +106,34 @@ class PushMessagingService {
         _handleMessageTap(initial);
       });
     }
+  }
+
+  /// Cancels all FCM stream listeners and resets the initialized flag so a
+  /// later [initialize] re-attaches a fresh set. Call this on logout to avoid
+  /// duplicate listeners (and duplicate SnackBars) after a re-login.
+  Future<void> dispose() async {
+    await _onMessageSub?.cancel();
+    await _onMessageOpenedAppSub?.cancel();
+    await _onTokenRefreshSub?.cancel();
+    _onMessageSub = null;
+    _onMessageOpenedAppSub = null;
+    _onTokenRefreshSub = null;
+    _initialized = false;
+  }
+
+  /// Deletes the device FCM token (Firebase) and clears it on the backend.
+  ///
+  /// Failure-safe at every step — a failure must never block logout.
+  Future<void> unregisterToken() async {
+    try {
+      await FirebaseMessaging.instance.deleteToken();
+    } catch (e) {
+      dev.log(
+        '[PushMessagingService] deleteToken() failed (non-fatal): $e',
+        name: 'push',
+      );
+    }
+    await _pushTokenService.unregister();
   }
 
   // ── Permission ─────────────────────────────────────────────────────────────
@@ -155,6 +211,8 @@ class PushMessagingService {
     final type = message.data['type'] as String?;
     if (type != 'NOVEDAD_CREATED') return;
 
+    final novedadId = message.data['novedadId'] as String?;
+
     final context = pushNavigatorKey.currentContext;
     if (context == null || !context.mounted) return;
 
@@ -164,7 +222,7 @@ class PushMessagingService {
         duration: const Duration(seconds: 6),
         action: SnackBarAction(
           label: 'Ver',
-          onPressed: () => _navigateToLiderScreen(),
+          onPressed: () => _navigateToLiderScreen(novedadId),
         ),
       ),
     );
@@ -179,15 +237,45 @@ class PushMessagingService {
     final type = message.data['type'] as String?;
     if (type != 'NOVEDAD_CREATED') return;
 
-    _navigateToLiderScreen();
+    final novedadId = message.data['novedadId'] as String?;
+    _navigateToLiderScreen(novedadId);
   }
 
-  void _navigateToLiderScreen() {
+  /// Opens the lider approval screen — but ONLY for roles allowed to approve
+  /// novedades (LIDER_OPERATIVO / SYSTEM_ADMIN). A push can land on any device,
+  /// so we re-check the current user's role (from the stored access token) before
+  /// navigating; the backend still enforces approve/reject, this avoids a
+  /// non-lider user landing on the approval screen.
+  Future<void> _navigateToLiderScreen([String? highlightNovedadId]) async {
+    final token = await _tokenStorage.readAccessToken();
+    final role = token != null ? _decodeRole(token) : null;
+    if (role != 'LIDER_OPERATIVO' && role != 'COORDINADOR' && role != 'SYSTEM_ADMIN') {
+      dev.log(
+        '[PushMessagingService] Ignoring lider deep-link for role "$role".',
+        name: 'push',
+      );
+      return;
+    }
     pushNavigatorKey.currentState?.push(
       MaterialPageRoute<void>(
-        builder: (_) => const LiderNovedadesScreen(),
+        builder: (_) =>
+            LiderNovedadesScreen(highlightNovedadId: highlightNovedadId),
       ),
     );
+  }
+
+  /// Decode (does not verify) the `role` claim from a JWT access token.
+  String? _decodeRole(String jwt) {
+    try {
+      final parts = jwt.split('.');
+      if (parts.length != 3) return null;
+      final payload = json.decode(
+        utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))),
+      ) as Map<String, dynamic>;
+      return payload['role'] as String?;
+    } catch (_) {
+      return null;
+    }
   }
 }
 
@@ -198,5 +286,8 @@ class PushMessagingService {
 /// Depends on [pushTokenServiceProvider] so token registration talks to the
 /// backend through the existing auth repository.
 final pushMessagingServiceProvider = Provider<PushMessagingService>((ref) {
-  return PushMessagingService(ref.watch(pushTokenServiceProvider));
+  return PushMessagingService(
+    ref.watch(pushTokenServiceProvider),
+    ref.watch(tokenStorageProvider),
+  );
 });

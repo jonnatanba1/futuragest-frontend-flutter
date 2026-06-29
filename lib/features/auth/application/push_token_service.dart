@@ -1,22 +1,16 @@
+import 'dart:developer' as dev;
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../domain/auth_repository.dart';
 import 'auth_providers.dart';
 
-/// Service that registers a FCM push token with the backend.
+/// Service that registers / unregisters the FCM push token with the backend.
 ///
-/// Usage today (stub): call [register] with a known token string for testing.
-///
-/// TODO(push): next slice —
-///   1. Add `firebase_messaging` to pubspec.yaml.
-///   2. Add google-services.json (Android) and GoogleService-Info.plist (iOS).
-///   3. Request notification permission via FirebaseMessaging.instance.requestPermission().
-///   4. Get the FCM token: final token = await FirebaseMessaging.instance.getToken();
-///   5. Detect platform: Platform.isAndroid ? 'android' : 'ios'.
-///   6. Call pushTokenServiceProvider.register(token, platform: platform)
-///      from the post-login hook (e.g., in LoginController after LoginSuccess).
-///   7. Also listen to FirebaseMessaging.instance.onTokenRefresh to re-register
-///      when FCM rotates the token.
+/// [register] is driven by [PushMessagingService] after login and on token
+/// refresh; [unregister] is driven by the logout flow so the backend stops
+/// targeting the device. Both methods are failure-safe: errors are swallowed
+/// and logged so a push-token failure never blocks the auth flow.
 class PushTokenService {
   PushTokenService(this._repository);
 
@@ -37,9 +31,25 @@ class PushTokenService {
     } on AuthException catch (e) {
       // Non-fatal: push token registration failure must never interrupt auth.
       // Log and swallow — the caller (PushMessagingService) also wraps in try/catch.
-      // TODO(push): add structured logging / crash reporter here.
-      // ignore: avoid_print
-      print('[PushTokenService] registerPushToken failed (non-fatal): $e');
+      dev.log(
+        '[PushTokenService] registerPushToken failed (non-fatal): $e',
+        name: 'push',
+      );
+    }
+  }
+
+  /// Clears the backend push token for the caller's current device session.
+  ///
+  /// Failure-safe: errors are swallowed and logged so a failure never blocks
+  /// the logout flow.
+  Future<void> unregister() async {
+    try {
+      await _repository.unregisterPushToken();
+    } on AuthException catch (e) {
+      dev.log(
+        '[PushTokenService] unregisterPushToken failed (non-fatal): $e',
+        name: 'push',
+      );
     }
   }
 }

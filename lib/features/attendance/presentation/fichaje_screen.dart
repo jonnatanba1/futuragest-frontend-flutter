@@ -1,91 +1,95 @@
+import 'dart:io';
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:signature/signature.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../../features/novedades/presentation/novedad_form_screen.dart';
 import '../application/fichaje_controller.dart';
 import '../application/fichaje_state.dart';
-import '../domain/attendance_record.dart';
 import '../domain/operario.dart';
 
-/// Full fichaje flow for a single operario.
+/// Full fichaje flow for a single operario — supports both INGRESO and SALIDA.
 ///
-/// Screen steps (enforced by state machine in [FichajeController]):
-///   1. Biometric confirmation + "Marcar entrada" → GPS + queue write
-///   2. Signature pad      → capture PNG + queue write (upload on sync)
-///   3. Biometric confirmation + "Marcar salida" → GPS + queue write
-///   4. Done confirmation  (sync badge if still pending)
+/// INGRESO (mode: FichajeMode.ingreso):
+///   1. Biometric + GPS → enqueue check-in (via controller.start())
+///   2. Camera photo capture → saveCheckInPhoto
+///   3. Done: "Ingreso registrado"
+///
+/// SALIDA (mode: FichajeMode.salida):
+///   1. Biometric + GPS → (controller.start())
+///   2. Camera photo capture → saveSalidaPhoto
+///   3. Done: "Salida registrada" (+ overtime button when serverAttendanceId known)
 class FichajeScreen extends ConsumerStatefulWidget {
-  const FichajeScreen({super.key, required this.operario});
+  const FichajeScreen({super.key, required this.params});
 
-  final Operario operario;
+  final FichajeParams params;
+
+  Operario get operario => params.operario;
 
   @override
   ConsumerState<FichajeScreen> createState() => _FichajeScreenState();
 }
 
 class _FichajeScreenState extends ConsumerState<FichajeScreen> {
-  late final SignatureController _signatureController;
+  // Captured photo — null means no photo taken yet.
+  XFile? _capturedPhoto;
 
   @override
   void initState() {
     super.initState();
-    _signatureController = SignatureController(
-      penStrokeWidth: 3,
-      penColor: Colors.black,
-      exportBackgroundColor: Colors.white,
-    );
-  }
-
-  @override
-  void dispose() {
-    _signatureController.dispose();
-    super.dispose();
+    // Auto-start the flow on first frame.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref
+          .read(fichajeControllerProvider(widget.params).notifier)
+          .start();
+    });
   }
 
   // ── Actions ────────────────────────────────────────────────────────────────
 
-  Future<void> _onCheckIn() async {
-    await ref
-        .read(fichajeControllerProvider(widget.operario).notifier)
-        .checkIn();
+  Future<void> _onTakePhoto() async {
+    final picker = ImagePicker();
+    final photo = await picker.pickImage(
+      source: ImageSource.camera,
+      preferredCameraDevice: CameraDevice.rear,
+      imageQuality: 70,
+      maxWidth: 1280,
+    );
+    // If the user cancelled the camera, do nothing — stay on the capture view.
+    if (photo == null) return;
+    if (!mounted) return;
+    setState(() {
+      _capturedPhoto = photo;
+    });
   }
 
-  Future<void> _onSaveSignature() async {
-    if (_signatureController.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Dibujá la firma del operario antes de guardar.'),
-        ),
-      );
-      return;
-    }
+  Future<void> _onConfirmPhoto() async {
+    final photo = _capturedPhoto;
+    if (photo == null) return;
 
-    final pngBytes = await _signatureController.toPngBytes();
+    final bytes = await File(photo.path).readAsBytes();
     if (!mounted) return;
 
-    if (pngBytes == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No se pudo exportar la firma.')),
-      );
-      return;
-    }
-
     await ref
-        .read(fichajeControllerProvider(widget.operario).notifier)
-        .uploadSignature(pngBytes.toList());
+        .read(fichajeControllerProvider(widget.params).notifier)
+        .uploadPhoto(bytes.toList());
   }
 
-  Future<void> _onCheckOut() async {
-    await ref
-        .read(fichajeControllerProvider(widget.operario).notifier)
-        .checkOut();
+  void _onRetakePhoto() {
+    setState(() {
+      _capturedPhoto = null;
+    });
   }
 
-  void _onRetry() {
-    ref
-        .read(fichajeControllerProvider(widget.operario).notifier)
+  Future<void> _onRetry() async {
+    setState(() {
+      _capturedPhoto = null;
+    });
+    await ref
+        .read(fichajeControllerProvider(widget.params).notifier)
         .retry();
   }
 
@@ -93,54 +97,91 @@ class _FichajeScreenState extends ConsumerState<FichajeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(fichajeControllerProvider(widget.operario));
+    final state = ref.watch(fichajeControllerProvider(widget.params));
+    final operario = widget.operario;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(widget.operario.fullName),
-            Text(
-              'Doc: ${widget.operario.documento}',
-              style: Theme.of(context).textTheme.bodySmall,
+      backgroundColor: Colors.transparent,
+      extendBodyBehindAppBar: true,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(kToolbarHeight),
+        child: ClipRect(
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              color: Colors.white.withValues(alpha: 0.8),
+              child: AppBar(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                centerTitle: true,
+                title: Text(
+                  'Detalle',
+                  style: GoogleFonts.manrope(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: const Color(0xFF005f48),
+                  ),
+                ),
+              ),
             ),
-          ],
+          ),
         ),
       ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: _buildBody(context, state),
-        ),
+      body: Stack(
+        children: [
+          // Gradient background
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFFF0FDF4), Color(0xFFE0F2FE), Color(0xFFFFF7ED)],
+              ),
+            ),
+          ),
+          SafeArea(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // ── Operario profile card ──────────────────────────────────
+                  _OperarioCard(operario: operario),
+                  const SizedBox(height: 16),
+                  // ── Flow body ──────────────────────────────────────────────
+                  _buildBody(context, state),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildBody(BuildContext context, FichajeState state) {
     return switch (state) {
-      FichajeIdle() => _CheckInView(onCheckIn: _onCheckIn),
-      FichajeCheckingIn() => const _BusyView(
-          message: 'Verificando identidad y registrando entrada…',
+      FichajeIdle() => const _BusyView(message: 'Iniciando…'),
+      FichajeCheckingIn() => _BusyView(
+          message: widget.params.mode == FichajeMode.ingreso
+              ? 'Verificando identidad y registrando entrada…'
+              : 'Verificando identidad y obteniendo ubicación…',
         ),
-      FichajeAwaitingSignature(:final record, :final isOffline) =>
-        _SignatureView(
-          controller: _signatureController,
-          onSave: _onSaveSignature,
-          recordId: record.id,
+      FichajeAwaitingPhoto(:final mode, :final isOffline) => _PhotoView(
+          capturedPhoto: _capturedPhoto,
+          onTakePhoto: _onTakePhoto,
+          onRetakePhoto: _onRetakePhoto,
+          onConfirmPhoto: _onConfirmPhoto,
+          mode: mode,
           isOffline: isOffline,
         ),
-      FichajeUploadingSignature() => const _BusyView(
-          message: 'Guardando firma…',
+      FichajeUploadingPhoto() => const _BusyView(
+          message: 'Guardando foto…',
         ),
-      FichajeSignatureDone(:final record) => _CheckOutView(
-          record: record,
-          onCheckOut: _onCheckOut,
+      FichajeDone(:final mode, :final serverAttendanceId) => _DoneView(
+          mode: mode,
+          serverAttendanceId: serverAttendanceId,
         ),
-      FichajeCheckingOut() => const _BusyView(
-          message: 'Verificando identidad y registrando salida…',
-        ),
-      FichajeDone(:final record) => _DoneView(record: record),
       FichajeError(:final message, :final previous) => _ErrorView(
           message: message,
           previous: previous,
@@ -150,199 +191,289 @@ class _FichajeScreenState extends ConsumerState<FichajeScreen> {
   }
 }
 
-// ── Step views ─────────────────────────────────────────────────────────────
+// ── Operario profile card ──────────────────────────────────────────────────
 
-class _CheckInView extends StatelessWidget {
-  const _CheckInView({required this.onCheckIn});
+class _OperarioCard extends StatelessWidget {
+  const _OperarioCard({required this.operario});
 
-  final VoidCallback onCheckIn;
+  final Operario operario;
+
+  String get _initials {
+    final parts = operario.fullName.trim().split(' ');
+    if (parts.length >= 2) {
+      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
+    }
+    return parts[0].isNotEmpty ? parts[0][0].toUpperCase() : '?';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 32),
-        Icon(
-          Icons.login,
-          size: 72,
-          color: theme.colorScheme.primary,
-        ),
-        const SizedBox(height: 24),
-        Text(
-          'Registrar entrada',
-          style: theme.textTheme.headlineSmall,
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Se solicitará tu huella o Face ID y se capturará tu ubicación GPS.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.secondary,
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.5)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
           ),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 40),
-        FilledButton.icon(
-          onPressed: onCheckIn,
-          icon: const Icon(Icons.login),
-          label: const Text('Marcar entrada'),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+        ],
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Row(
+        children: [
+          // Avatar with ring
+          Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: const Color(0xFF005f48).withValues(alpha: 0.3),
+                width: 2.5,
+              ),
+            ),
+            child: CircleAvatar(
+              radius: 30,
+              backgroundColor: const Color(0xFF005f48).withValues(alpha: 0.1),
+              child: Text(
+                _initials,
+                style: GoogleFonts.manrope(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF005f48),
+                ),
+              ),
+            ),
           ),
-        ),
-      ],
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  operario.fullName.toUpperCase(),
+                  style: GoogleFonts.manrope(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: const Color(0xFF1a1c1b),
+                    letterSpacing: 0.3,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF00597d).withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    'ID: ${operario.documento}',
+                    style: GoogleFonts.manrope(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: const Color(0xFF00597d),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
 
-class _SignatureView extends StatelessWidget {
-  const _SignatureView({
-    required this.controller,
-    required this.onSave,
-    required this.recordId,
+// ── Step views ─────────────────────────────────────────────────────────────
+
+class _PhotoView extends StatelessWidget {
+  const _PhotoView({
+    required this.capturedPhoto,
+    required this.onTakePhoto,
+    required this.onRetakePhoto,
+    required this.onConfirmPhoto,
+    required this.mode,
     this.isOffline = false,
   });
 
-  final SignatureController controller;
-  final VoidCallback onSave;
-  final String recordId;
+  final XFile? capturedPhoto;
+  final VoidCallback onTakePhoto;
+  final VoidCallback onRetakePhoto;
+  final VoidCallback onConfirmPhoto;
+  final FichajeMode mode;
   final bool isOffline;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final isIngreso = mode == FichajeMode.ingreso;
+    final hasPhoto = capturedPhoto != null;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Icon(Icons.check_circle, color: theme.colorScheme.primary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Entrada registrada',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  color: theme.colorScheme.primary,
+        // Status card
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.5)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              const Icon(Icons.check_circle, color: Color(0xFF005f48)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  isIngreso ? 'Entrada registrada' : 'Ubicación capturada',
+                  style: GoogleFonts.manrope(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: const Color(0xFF005f48),
+                  ),
                 ),
               ),
-            ),
-            if (isOffline) const _OfflineBadge(),
-          ],
+              if (isOffline) const _OfflineBadge(),
+            ],
+          ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: 16),
         Text(
-          'Firma del operario',
-          style: theme.textTheme.titleLarge,
+          isIngreso ? 'Foto de ingreso' : 'Foto de salida',
+          style: GoogleFonts.manrope(
+            fontSize: 17,
+            fontWeight: FontWeight.w700,
+            color: const Color(0xFF1a1c1b),
+          ),
         ),
         const SizedBox(height: 4),
         Text(
-          'Pedile al operario que firme en el recuadro de abajo.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.secondary,
+          'Tomá una foto del operario para confirmar su identidad.',
+          style: GoogleFonts.manrope(
+            fontSize: 13,
+            color: const Color(0xFF6e7a74),
           ),
         ),
         const SizedBox(height: 16),
-        Container(
-          decoration: BoxDecoration(
-            border: Border.all(
-              color: theme.colorScheme.outline,
-              width: 1.5,
-            ),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          height: 240,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(7),
-            child: Signature(
-              controller: controller,
-              backgroundColor: Colors.white,
-            ),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerRight,
-          child: TextButton.icon(
-            onPressed: controller.clear,
-            icon: const Icon(Icons.delete_outline),
-            label: const Text('Limpiar firma'),
-          ),
-        ),
-        const SizedBox(height: 16),
-        FilledButton.icon(
-          onPressed: onSave,
-          icon: const Icon(Icons.upload),
-          label: const Text('Guardar firma'),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _CheckOutView extends StatelessWidget {
-  const _CheckOutView({
-    required this.record,
-    required this.onCheckOut,
-  });
-
-  final AttendanceRecord record;
-  final VoidCallback onCheckOut;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 32),
-        Row(
-          children: [
-            Icon(Icons.check_circle, color: theme.colorScheme.primary),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Entrada y firma registradas',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  color: theme.colorScheme.primary,
+        if (!hasPhoto) ...[
+          // No photo yet — show the "Tomar foto" button.
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF005f48).withValues(alpha: 0.4),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
                 ),
+              ],
+            ),
+            child: FilledButton.icon(
+              onPressed: onTakePhoto,
+              icon: const Icon(Icons.camera_alt),
+              label: Text(
+                'Tomar foto',
+                style: GoogleFonts.manrope(fontWeight: FontWeight.w600),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF005f48),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                minimumSize: const Size(double.infinity, 52),
               ),
             ),
-          ],
-        ),
-        const SizedBox(height: 32),
-        Icon(Icons.logout, size: 72, color: theme.colorScheme.secondary),
-        const SizedBox(height: 24),
-        Text(
-          'Registrar salida',
-          style: theme.textTheme.headlineSmall,
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Se solicitará tu huella o Face ID y se capturará tu ubicación GPS.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.secondary,
           ),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 40),
-        FilledButton.icon(
-          onPressed: onCheckOut,
-          icon: const Icon(Icons.logout),
-          label: const Text('Marcar salida'),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+        ] else ...[
+          // Photo captured — show preview and action buttons.
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.08),
+                  blurRadius: 16,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            height: 280,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Image.file(
+                File(capturedPhoto!.path),
+                fit: BoxFit.cover,
+              ),
+            ),
           ),
-        ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: const Color(0xFF005f48).withValues(alpha: 0.3),
+                    ),
+                  ),
+                  child: OutlinedButton.icon(
+                    onPressed: onRetakePhoto,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Repetir'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: const Color(0xFF005f48),
+                      side: BorderSide.none,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF005f48).withValues(alpha: 0.35),
+                        blurRadius: 12,
+                        offset: const Offset(0, 6),
+                      ),
+                    ],
+                  ),
+                  child: FilledButton.icon(
+                    onPressed: onConfirmPhoto,
+                    icon: const Icon(Icons.check),
+                    label: const Text('Guardar foto'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF005f48),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -355,16 +486,32 @@ class _BusyView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 64),
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 32),
+      padding: const EdgeInsets.all(32),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.5)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.05),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
       child: Column(
         children: [
-          const CircularProgressIndicator(),
+          const CircularProgressIndicator(color: Color(0xFF005f48)),
           const SizedBox(height: 24),
           Text(
             message,
             textAlign: TextAlign.center,
-            style: Theme.of(context).textTheme.bodyLarge,
+            style: GoogleFonts.manrope(
+              fontSize: 15,
+              color: const Color(0xFF3e4944),
+            ),
           ),
         ],
       ),
@@ -373,77 +520,134 @@ class _BusyView extends StatelessWidget {
 }
 
 class _DoneView extends StatelessWidget {
-  const _DoneView({required this.record});
+  const _DoneView({
+    required this.mode,
+    this.serverAttendanceId,
+  });
 
-  final AttendanceRecord record;
+  final FichajeMode mode;
+  final String? serverAttendanceId;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
-    // The novedad form requires a real server ID. When the check-out was
-    // captured offline (id == ''), the button is disabled with a note.
-    final hasServerId = record.id.isNotEmpty;
+    final isIngreso = mode == FichajeMode.ingreso;
+    // Overtime can be pre-authorized after the ingreso too (operario is now working,
+    // before any salida) — it only needs the synced server attendance id.
+    final canOvertime =
+        serverAttendanceId != null && serverAttendanceId!.isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 48),
-        Icon(
-          Icons.check_circle,
-          size: 80,
-          color: theme.colorScheme.primary,
-        ),
-        const SizedBox(height: 24),
-        Text(
-          'Asistencia completa',
-          style: theme.textTheme.headlineSmall,
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Entrada, firma y salida registradas correctamente.',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.secondary,
+        const SizedBox(height: 16),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.5)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 32),
-        // ── Novedad shortcut ─────────────────────────────────────────────
-        FilledButton.icon(
-          onPressed: hasServerId
-              ? () {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) =>
-                          NovedadFormScreen(attendanceId: record.id),
-                    ),
-                  );
-                }
-              : null,
-          icon: const Icon(Icons.more_time),
-          label: const Text('Registrar horas extra'),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: 40, horizontal: 24),
+          child: Column(
+            children: [
+              const Icon(
+                Icons.check_circle,
+                size: 80,
+                color: Color(0xFF005f48),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                isIngreso ? 'Ingreso registrado' : 'Salida registrada',
+                style: GoogleFonts.manrope(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFF1a1c1b),
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                isIngreso
+                    ? 'Entrada y foto de ingreso guardadas correctamente.'
+                    : 'Foto de salida guardada. La asistencia quedará completa al sincronizar.',
+                style: GoogleFonts.manrope(
+                  fontSize: 14,
+                  color: const Color(0xFF6e7a74),
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
           ),
         ),
-        if (!hasServerId) ...[
-          const SizedBox(height: 6),
-          Text(
-            'Disponible una vez que la asistencia se sincronice.',
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.secondary,
+        const SizedBox(height: 16),
+        // Overtime button — shown after ingreso or salida, whenever the server id
+        // is known, so the supervisor can pre-authorize extra hours before checkout.
+        if (canOvertime) ...[
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: const Color(0xFF005f48).withValues(alpha: 0.4),
+                  blurRadius: 16,
+                  offset: const Offset(0, 8),
+                ),
+              ],
             ),
-            textAlign: TextAlign.center,
+            child: FilledButton.icon(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) =>
+                        NovedadFormScreen(attendanceId: serverAttendanceId!),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.more_time),
+              label: Text(
+                'Registrar horas extra',
+                style: GoogleFonts.manrope(fontWeight: FontWeight.w600),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF005f48),
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                minimumSize: const Size(double.infinity, 52),
+              ),
+            ),
           ),
+          const SizedBox(height: 12),
         ],
-        const SizedBox(height: 12),
-        OutlinedButton.icon(
-          onPressed: () => Navigator.of(context).pop(),
-          icon: const Icon(Icons.arrow_back),
-          label: const Text('Volver a la lista'),
-          style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: const Color(0xFF005f48).withValues(alpha: 0.3),
+            ),
+          ),
+          child: OutlinedButton.icon(
+            onPressed: () => Navigator.of(context).pop(),
+            icon: const Icon(Icons.arrow_back),
+            label: Text(
+              'Volver a la lista',
+              style: GoogleFonts.manrope(fontWeight: FontWeight.w600),
+            ),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF005f48),
+              side: BorderSide.none,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              minimumSize: const Size(double.infinity, 52),
+            ),
           ),
         ),
       ],
@@ -460,74 +664,151 @@ class _ErrorView extends StatelessWidget {
 
   final String message;
   final FichajeState previous;
-  final VoidCallback onRetry;
+  final Future<void> Function() onRetry;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const SizedBox(height: 48),
-        Icon(
-          Icons.error_outline,
-          size: 72,
-          color: theme.colorScheme.error,
-        ),
-        const SizedBox(height: 24),
-        Text(
-          'Ocurrió un error',
-          style: theme.textTheme.headlineSmall?.copyWith(
-            color: theme.colorScheme.error,
+        const SizedBox(height: 16),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.5)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.05),
+                blurRadius: 20,
+                offset: const Offset(0, 4),
+              ),
+            ],
           ),
-          textAlign: TextAlign.center,
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            children: [
+              const Icon(
+                Icons.error_outline,
+                size: 72,
+                color: Color(0xFFba1a1a),
+              ),
+              const SizedBox(height: 24),
+              Text(
+                'Ocurrió un error',
+                style: GoogleFonts.manrope(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  color: const Color(0xFFba1a1a),
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFba1a1a).withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  message,
+                  style: GoogleFonts.manrope(
+                    color: const Color(0xFFba1a1a),
+                    fontSize: 13,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ],
+          ),
         ),
-        const SizedBox(height: 12),
-        Card(
-          color: theme.colorScheme.errorContainer,
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              message,
-              style: TextStyle(color: theme.colorScheme.onErrorContainer),
-              textAlign: TextAlign.center,
+        const SizedBox(height: 16),
+        Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFF005f48).withValues(alpha: 0.35),
+                blurRadius: 14,
+                offset: const Offset(0, 7),
+              ),
+            ],
+          ),
+          child: FilledButton.icon(
+            onPressed: onRetry,
+            icon: const Icon(Icons.refresh),
+            label: Text(
+              'Reintentar',
+              style: GoogleFonts.manrope(fontWeight: FontWeight.w600),
+            ),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF005f48),
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              minimumSize: const Size(double.infinity, 52),
             ),
           ),
         ),
-        const SizedBox(height: 32),
-        FilledButton.icon(
-          onPressed: onRetry,
-          icon: const Icon(Icons.refresh),
-          label: const Text('Reintentar'),
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-          ),
-        ),
         const SizedBox(height: 12),
-        OutlinedButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancelar'),
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: 0.7),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: Colors.black.withValues(alpha: 0.1),
+            ),
+          ),
+          child: OutlinedButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF3e4944),
+              side: BorderSide.none,
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              minimumSize: const Size(double.infinity, 52),
+            ),
+            child: Text(
+              'Cancelar',
+              style: GoogleFonts.manrope(fontWeight: FontWeight.w600),
+            ),
+          ),
         ),
       ],
     );
   }
 }
 
-/// Small chip shown when the check-in is queued but not yet synced.
+/// Small chip shown when the underlying ingreso hasn't synced yet.
 class _OfflineBadge extends StatelessWidget {
   const _OfflineBadge();
 
   @override
   Widget build(BuildContext context) {
-    return Chip(
-      avatar: const Icon(Icons.cloud_off, size: 14),
-      label: const Text(
-        'Pendiente',
-        style: TextStyle(fontSize: 11),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFff8a00).withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
       ),
-      padding: EdgeInsets.zero,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.cloud_off, size: 12, color: Color(0xFF914c00)),
+          const SizedBox(width: 4),
+          Text(
+            'Pendiente',
+            style: GoogleFonts.manrope(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: const Color(0xFF914c00),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

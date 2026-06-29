@@ -66,9 +66,6 @@ class AuthRepositoryImpl implements AuthRepository {
     required String pushToken,
     String? pushPlatform,
   }) async {
-    // TODO(push): next slice — obtain the real FCM token via firebase_messaging
-    //             (add firebase_messaging dep + google-services.json / GoogleService-Info.plist)
-    //             and call this method from a post-login service hook.
     try {
       await dio.post<void>(
         '/auth/push-token',
@@ -89,6 +86,23 @@ class AuthRepositoryImpl implements AuthRepository {
       }
       throw AuthException(
         'Error al registrar el token de notificaciones: ${e.message}',
+      );
+    }
+  }
+
+  @override
+  Future<void> unregisterPushToken() async {
+    try {
+      await dio.delete<void>('/auth/push-token');
+    } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      if (status == 401) {
+        throw const AuthException(
+          'No autenticado. Iniciá sesión nuevamente.',
+        );
+      }
+      throw AuthException(
+        'Error al eliminar el token de notificaciones: ${e.message}',
       );
     }
   }

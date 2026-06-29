@@ -1,7 +1,7 @@
 /// The server-side attendance record returned after a successful check-in.
 ///
 /// The [id] is the server-assigned primary key required for subsequent
-/// signature upload and check-out requests.
+/// photo upload and check-out requests.
 class AttendanceRecord {
   const AttendanceRecord({
     required this.id,
@@ -12,7 +12,7 @@ class AttendanceRecord {
     required this.checkInLat,
     required this.checkInLng,
     this.checkInAccuracy,
-    this.signatureUploaded = false,
+    this.photoUploaded = false,
     this.checkOutCapturedAt,
     this.checkOutLat,
     this.checkOutLng,
@@ -20,7 +20,7 @@ class AttendanceRecord {
     this.completedAt,
   });
 
-  /// Server-assigned attendance ID (used for /signature and /check-out).
+  /// Server-assigned attendance ID (used for /photo and /check-out).
   final String id;
 
   final String operarioId;
@@ -36,8 +36,8 @@ class AttendanceRecord {
   final double checkInLng;
   final double? checkInAccuracy;
 
-  /// Whether the signature has been uploaded to the server.
-  final bool signatureUploaded;
+  /// Whether the operario photo has been uploaded to the server.
+  final bool photoUploaded;
 
   final DateTime? checkOutCapturedAt;
   final double? checkOutLat;
@@ -50,7 +50,7 @@ class AttendanceRecord {
   bool get isComplete => completedAt != null;
 
   AttendanceRecord copyWith({
-    bool? signatureUploaded,
+    bool? photoUploaded,
     DateTime? checkOutCapturedAt,
     double? checkOutLat,
     double? checkOutLng,
@@ -66,7 +66,7 @@ class AttendanceRecord {
       checkInLat: checkInLat,
       checkInLng: checkInLng,
       checkInAccuracy: checkInAccuracy,
-      signatureUploaded: signatureUploaded ?? this.signatureUploaded,
+      photoUploaded: photoUploaded ?? this.photoUploaded,
       checkOutCapturedAt: checkOutCapturedAt ?? this.checkOutCapturedAt,
       checkOutLat: checkOutLat ?? this.checkOutLat,
       checkOutLng: checkOutLng ?? this.checkOutLng,

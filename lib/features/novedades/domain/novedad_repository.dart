@@ -31,15 +31,19 @@ abstract interface class NovedadRepository {
 
   /// Approves a pending novedad (PATCH /novedades/:id/approve).
   ///
+  /// [verification] is an optional audit label ('BIOMETRIC' |
+  /// 'DEVICE_CREDENTIAL' | 'NONE'). AUDIT LABEL ONLY.
   /// Throws [NovedadAlreadyDecidedException] on 409 (already approved/rejected).
   /// Throws [NovedadException] on 404 or other errors.
-  Future<void> approveNovedad(String id);
+  Future<void> approveNovedad(String id, {String? verification});
 
   /// Rejects a pending novedad (PATCH /novedades/:id/reject).
   ///
+  /// [verification] is an optional audit label ('BIOMETRIC' |
+  /// 'DEVICE_CREDENTIAL' | 'NONE'). AUDIT LABEL ONLY.
   /// Throws [NovedadAlreadyDecidedException] on 409 (already approved/rejected).
   /// Throws [NovedadException] on 404 or other errors.
-  Future<void> rejectNovedad(String id);
+  Future<void> rejectNovedad(String id, {String? verification});
 }
 
 /// Domain exception for novedad failures. Always carries a Spanish message

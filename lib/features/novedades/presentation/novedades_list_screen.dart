@@ -1,5 +1,8 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:google_fonts/google_fonts.dart';
 
 import '../application/novedad_providers.dart';
 import '../domain/novedad.dart';
@@ -16,30 +19,72 @@ class NovedadesListScreen extends ConsumerWidget {
     final novedadesAsync = ref.watch(novedadesListProvider);
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Mis novedades'),
-      ),
-      body: RefreshIndicator(
-        onRefresh: () => ref.refresh(novedadesListProvider.future),
-        child: novedadesAsync.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (err, _) => _ErrorBody(
-            message: err is Exception ? err.toString() : 'Error desconocido.',
-            onRetry: () => ref.invalidate(novedadesListProvider),
+      backgroundColor: Colors.transparent,
+      extendBodyBehindAppBar: true,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(kToolbarHeight),
+        child: ClipRect(
+          child: BackdropFilter(
+            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            child: Container(
+              color: Colors.white.withValues(alpha: 0.8),
+              child: AppBar(
+                backgroundColor: Colors.transparent,
+                elevation: 0,
+                centerTitle: true,
+                title: Text(
+                  'Mis novedades',
+                  style: GoogleFonts.manrope(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: const Color(0xFF005f48),
+                  ),
+                ),
+              ),
+            ),
           ),
-          data: (novedades) {
-            if (novedades.isEmpty) {
-              return const _EmptyBody();
-            }
-            return ListView.separated(
-              padding: const EdgeInsets.all(16),
-              itemCount: novedades.length,
-              separatorBuilder: (context2, idx) => const SizedBox(height: 8),
-              itemBuilder: (context, index) =>
-                  _NovedadCard(novedad: novedades[index]),
-            );
-          },
         ),
+      ),
+      body: Stack(
+        children: [
+          // Gradient background
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [Color(0xFFF0FDF4), Color(0xFFE0F2FE), Color(0xFFFFF7ED)],
+              ),
+            ),
+          ),
+          RefreshIndicator(
+            onRefresh: () => ref.refresh(novedadesListProvider.future),
+            child: novedadesAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, _) => _ErrorBody(
+                message: err is Exception ? err.toString() : 'Error desconocido.',
+                onRetry: () => ref.invalidate(novedadesListProvider),
+              ),
+              data: (novedades) {
+                if (novedades.isEmpty) {
+                  return const _EmptyBody();
+                }
+                return ListView.separated(
+                  padding: EdgeInsets.only(
+                    top: MediaQuery.of(context).padding.top + kToolbarHeight + 16,
+                    left: 16,
+                    right: 16,
+                    bottom: 24,
+                  ),
+                  itemCount: novedades.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 10),
+                  itemBuilder: (context, index) =>
+                      _NovedadCard(novedad: novedades[index]),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -52,144 +97,211 @@ class _NovedadCard extends StatelessWidget {
 
   final Novedad novedad;
 
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final formattedDate = _formatDate(novedad.createdAt);
-    final horasLabel = _formatHoras(novedad.horasExtra);
-
-    return Card(
-      elevation: 1,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // ── Header row: date + status chip ─────────────────────────────
-            Row(
-              children: [
-                Icon(
-                  Icons.access_time,
-                  size: 16,
-                  color: theme.colorScheme.secondary,
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    formattedDate,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.secondary,
-                    ),
-                  ),
-                ),
-                _StatusChip(status: novedad.status),
-              ],
-            ),
-            const SizedBox(height: 12),
-
-            // ── Horas extra ─────────────────────────────────────────────────
-            Text(
-              horasLabel,
-              style: theme.textTheme.titleLarge?.copyWith(
-                fontWeight: FontWeight.bold,
-                color: theme.colorScheme.primary,
-              ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              'horas extra',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.secondary,
-              ),
-            ),
-
-            // ── Motivo ─────────────────────────────────────────────────────
-            if (novedad.motivo != null && novedad.motivo!.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              Text(
-                novedad.motivo!,
-                style: theme.textTheme.bodyMedium,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-
-            // ── Decision info (for approved/rejected) ──────────────────────
-            if (novedad.status != NovedadStatus.pending &&
-                novedad.decidedAt != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                '${novedad.status == NovedadStatus.approved ? 'Aprobada' : 'Rechazada'} el ${_formatDate(novedad.decidedAt!)}',
-                style: theme.textTheme.bodySmall?.copyWith(
-                  color: theme.colorScheme.secondary,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
   String _formatDate(DateTime dt) {
     final local = dt.toLocal();
-    final d = local.day.toString().padLeft(2, '0');
-    final mo = local.month.toString().padLeft(2, '0');
-    final y = local.year.toString();
-    final h = local.hour.toString().padLeft(2, '0');
-    final m = local.minute.toString().padLeft(2, '0');
-    return '$d/$mo/$y $h:$m';
+    const months = [
+      'ene', 'feb', 'mar', 'abr', 'may', 'jun',
+      'jul', 'ago', 'sep', 'oct', 'nov', 'dic',
+    ];
+    return '${local.day} ${months[local.month - 1]}';
   }
 
   String _formatHoras(String horasExtra) {
     final d = double.tryParse(horasExtra);
     if (d == null) return horasExtra;
-    // Show as integer if no decimal part, otherwise two decimal places.
     if (d == d.truncateToDouble()) return d.toInt().toString();
-    return d.toStringAsFixed(2);
+    return d.toStringAsFixed(1);
   }
-}
-
-// ── Status chip ────────────────────────────────────────────────────────────
-
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
-
-  final NovedadStatus status;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
+    final dateLabel = _formatDate(novedad.createdAt);
+    final horasLabel = _formatHoras(novedad.horasExtra);
 
-    final (label, color) = switch (status) {
+    final (statusColor, statusBg) = switch (novedad.status) {
       NovedadStatus.pending => (
-          'Pendiente',
-          theme.colorScheme.tertiary,
+          const Color(0xFF00597d),
+          const Color(0xFF00597d),
         ),
       NovedadStatus.approved => (
-          'Aprobada',
-          Colors.green.shade700,
+          const Color(0xFF005f48),
+          const Color(0xFF005f48),
         ),
       NovedadStatus.rejected => (
-          'Rechazada',
-          theme.colorScheme.error,
+          const Color(0xFFba1a1a),
+          const Color(0xFFba1a1a),
         ),
     };
+    final statusLabel = switch (novedad.status) {
+      NovedadStatus.pending => 'Pendiente',
+      NovedadStatus.approved => 'Aprobada',
+      NovedadStatus.rejected => 'Rechazada',
+    };
 
-    return Chip(
-      label: Text(
-        label,
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.85),
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: const Color(0xFFbdc9c2).withValues(alpha: 0.2),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 32,
+            offset: const Offset(0, 8),
+          ),
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.02),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Semantic icon circle ─────────────────────────────────────
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: const Color(0xFF005f48).withValues(alpha: 0.1),
+              ),
+              child: const Icon(
+                Icons.more_time,
+                color: Color(0xFF005f48),
+                size: 22,
+              ),
+            ),
+            const SizedBox(width: 16),
+
+            // ── Content ──────────────────────────────────────────────────
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Title row + date badge
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Horas Extra Solicitadas',
+                          style: GoogleFonts.manrope(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                            color: const Color(0xFF1a1c1e),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFeeeef0),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          dateLabel,
+                          style: GoogleFonts.manrope(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: const Color(0xFF3e4944),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // Motivo / subtitle
+                  if (novedad.motivo != null && novedad.motivo!.isNotEmpty) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      novedad.motivo!,
+                      style: GoogleFonts.manrope(
+                        fontSize: 13,
+                        color: const Color(0xFF3e4944),
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+
+                  const SizedBox(height: 12),
+
+                  // Tags row
+                  Row(
+                    children: [
+                      // Horas tag
+                      _Tag(
+                        icon: Icons.add_circle_outline,
+                        label: '+$horasLabel horas',
+                        color: const Color(0xFF005f48),
+                      ),
+                      const SizedBox(width: 8),
+                      // Status tag
+                      _Tag(
+                        label: statusLabel,
+                        color: statusColor,
+                        bg: statusBg,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            // ── Chevron ───────────────────────────────────────────────────
+            const SizedBox(width: 8),
+            const Icon(
+              Icons.chevron_right,
+              color: Color(0xFFbdc9c2),
+              size: 20,
+            ),
+          ],
         ),
       ),
-      backgroundColor: color,
-      padding: EdgeInsets.zero,
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      visualDensity: VisualDensity.compact,
+    );
+  }
+}
+
+class _Tag extends StatelessWidget {
+  const _Tag({required this.label, required this.color, this.icon, this.bg});
+  final String label;
+  final Color color;
+  final IconData? icon;
+  final Color? bg;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: (bg ?? color).withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 12, color: color),
+            const SizedBox(width: 4),
+          ],
+          Text(
+            label,
+            style: GoogleFonts.manrope(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -201,30 +313,33 @@ class _EmptyBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
+            const Icon(
               Icons.inbox_outlined,
               size: 72,
-              color: theme.colorScheme.secondary.withValues(alpha: 0.5),
+              color: Color(0x8000597d),
             ),
             const SizedBox(height: 16),
             Text(
               'Sin novedades todavía',
-              style: theme.textTheme.titleMedium?.copyWith(
-                color: theme.colorScheme.secondary,
+              style: GoogleFonts.manrope(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: const Color(0xFF3e4944),
               ),
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             Text(
               'Las horas extra que registrés aparecerán acá.',
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.secondary,
+              style: GoogleFonts.manrope(
+                fontSize: 13,
+                color: const Color(0xFF6e7a74),
               ),
               textAlign: TextAlign.center,
             ),
@@ -243,29 +358,34 @@ class _ErrorBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
+            const Icon(
               Icons.error_outline,
-              size: 64,
-              color: theme.colorScheme.error,
+              size: 72,
+              color: Color(0xFFba1a1a),
             ),
             const SizedBox(height: 16),
             Text(
               'Error al cargar las novedades',
-              style: theme.textTheme.titleMedium?.copyWith(
-                color: theme.colorScheme.error,
+              style: GoogleFonts.manrope(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: const Color(0xFFba1a1a),
               ),
+              textAlign: TextAlign.center,
             ),
             const SizedBox(height: 8),
             Text(
               message,
-              style: theme.textTheme.bodySmall,
+              style: GoogleFonts.manrope(
+                fontSize: 13,
+                color: const Color(0xFF3e4944),
+              ),
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
@@ -273,6 +393,13 @@ class _ErrorBody extends StatelessWidget {
               onPressed: onRetry,
               icon: const Icon(Icons.refresh),
               label: const Text('Reintentar'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFF005f48),
+                side: const BorderSide(color: Color(0xFF005f48)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
             ),
           ],
         ),

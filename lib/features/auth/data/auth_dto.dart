@@ -38,11 +38,14 @@ UserProfile userProfileFromJson(Map<String, dynamic> json) {
 
   if (role == UserRole.supervisor && json['supervisor'] != null) {
     final s = json['supervisor'] as Map<String, dynamic>;
+    // Backend returns zone/municipio as { id, name } objects, not strings.
+    final z = s['zone'] as Map<String, dynamic>;
+    final m = s['municipio'] as Map<String, dynamic>;
     supervisor = SupervisorInfo(
       id: s['id'] as String,
       area: s['area'] as String,
-      zone: s['zone'] as String,
-      municipio: s['municipio'] as String,
+      zone: z['name'] as String,
+      municipio: m['name'] as String,
     );
   }
 

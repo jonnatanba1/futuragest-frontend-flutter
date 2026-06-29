@@ -17,8 +17,9 @@ class SyncStats {
     this.failed = 0,
   });
 
-  /// Number of records that still need to reach the backend (any non-terminal
-  /// status except [FichajeQueueStatus.completed] and [FichajeQueueStatus.failed]).
+  /// Number of records that still need to reach the backend.
+  /// [FichajeQueueStatus.ingresoComplete] is excluded — it is a resting state
+  /// (ingreso fully synced, awaiting salida capture) with no pending network work.
   final int pending;
 
   /// [true] while a background sync pass is running.
@@ -48,10 +49,19 @@ class SyncStats {
 ///     Lost responses are recovered via GET /asistencia?clientRef=.
 ///  5. Exposes [SyncStats] for the UI indicator.
 ///
-/// Replay order per item:
-///   pendingCheckIn         → POST check-in → markCheckedIn (or recover)
-///   checkedInPendingSignature → POST signature → markSignatureUploaded
-///   signedPendingCheckOut  → POST check-out  → markCompleted
+/// State machine per queue row (_replayOne):
+///   pendingCheckIn     → POST check-in → markCheckedIn; status=checkedIn
+///   checkedIn          → requires checkInPhotoPath
+///                        → POST photo?phase=checkin → markIngresoComplete; status=ingresoComplete
+///   ingresoComplete    → if checkOutPhotoPath present
+///                        → POST photo?phase=checkout → markSalidaSigned; status=salidaSigned
+///                        else NOTHING (resting — awaiting salida capture)
+///   salidaSigned       → requires checkOutClientRef
+///                        → POST check-out → markCompleted; status=completed
+///
+/// Key property: a row can accumulate BOTH ingreso AND salida data offline
+/// (while still at pendingCheckIn). Replay then walks all four steps in
+/// sequence once online — the step guards make this work regardless of status.
 class FichajeSyncService extends StateNotifier<SyncStats> {
   FichajeSyncService({
     required FichajeQueueRepository queue,
@@ -73,19 +83,25 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
 
   StreamSubscription<bool>? _connectivitySubTyped;
   bool _syncing = false;
+  // True once _queue.init() has completed. The constructor subscribes to the
+  // connectivity stream, which can emit "online" before init() finishes — this
+  // flag prevents _replayAll from touching the DB before it is initialised.
+  bool _initialised = false;
 
   // ── Public API ─────────────────────────────────────────────────────────────
 
   /// Initialises the database and triggers an initial sync attempt.
   Future<void> init() async {
     await _queue.init();
+    _initialised = true;
     await _refreshStats();
     final online = await _connectivity.isOnline();
     if (online) await _replayAll();
   }
 
-  /// Enqueues a new fichaje (write-first), then attempts sync if online.
+  /// Enqueues a new fichaje ingreso (write-first), then attempts sync if online.
   ///
+  /// [checkInVerification] is the audit label from the biometric gate.
   /// Returns the queued [PendingFichaje] so the controller can track [localId].
   Future<PendingFichaje> enqueue({
     required String operarioId,
@@ -94,6 +110,7 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
     required String clientRef,
     required DateTime checkInCapturedAt,
     required GpsPosition checkInGps,
+    String? checkInVerification,
   }) async {
     final pending = await _queue.enqueue(
       operarioId: operarioId,
@@ -102,6 +119,7 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
       clientRef: clientRef,
       checkInCapturedAt: checkInCapturedAt,
       checkInGps: checkInGps,
+      checkInVerification: checkInVerification,
     );
     await _refreshStats();
 
@@ -111,30 +129,37 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
     return pending;
   }
 
-  /// Saves the captured signature bytes for [localId].
-  Future<void> saveSignature({
+  /// Saves the captured ingreso (entry) photo bytes for [localId].
+  Future<void> saveCheckInPhoto({
     required int localId,
-    required List<int> pngBytes,
+    required List<int> photoBytes,
   }) async {
-    await _queue.saveSignature(localId: localId, pngBytes: pngBytes);
+    await _queue.saveCheckInPhoto(localId: localId, photoBytes: photoBytes);
     await _refreshStats();
 
     final online = await _connectivity.isOnline();
     if (online) unawaited(_replayAll());
   }
 
-  /// Saves the check-out intent for [localId].
-  Future<void> saveCheckOut({
+  /// Saves the salida (exit) data: exit photo + GPS/time for [localId].
+  ///
+  /// [checkOutVerification] is the audit label from the biometric gate.
+  /// Does NOT change the status — replay advances it through the steps.
+  Future<void> saveSalida({
     required int localId,
+    required List<int> checkOutPhotoBytes,
     required String checkOutClientRef,
     required DateTime checkOutCapturedAt,
     required GpsPosition checkOutGps,
+    String? checkOutVerification,
   }) async {
-    await _queue.saveCheckOut(
+    await _queue.saveSalida(
       localId: localId,
+      checkOutPhotoBytes: checkOutPhotoBytes,
       checkOutClientRef: checkOutClientRef,
       checkOutCapturedAt: checkOutCapturedAt,
       checkOutGps: checkOutGps,
+      checkOutVerification: checkOutVerification,
     );
     await _refreshStats();
 
@@ -151,6 +176,8 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
   // ── Replay ─────────────────────────────────────────────────────────────────
 
   Future<void> _replayAll() async {
+    // Guard against the connectivity stream firing before init() completes.
+    if (!_initialised) return;
     if (_syncing) return;
     _syncing = true;
     state = state.copyWith(syncing: true);
@@ -176,14 +203,24 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
         if (current.status == FichajeQueueStatus.failed) return;
       }
 
-      // ── Step 2: POST signature ────────────────────────────────────────────
-      if (current.status == FichajeQueueStatus.checkedInPendingSignature) {
-        current = await _stepUploadSignature(current);
+      // ── Step 2: POST entry (ingreso) photo ────────────────────────────────
+      if (current.status == FichajeQueueStatus.checkedIn) {
+        current = await _stepUploadCheckinPhoto(current);
         if (current.status == FichajeQueueStatus.failed) return;
       }
 
-      // ── Step 3: POST check-out ────────────────────────────────────────────
-      if (current.status == FichajeQueueStatus.signedPendingCheckOut) {
+      // ── Step 3: POST exit (salida) photo ──────────────────────────────────
+      // Only advance when checkOutPhotoPath is present.
+      if (current.status == FichajeQueueStatus.ingresoComplete) {
+        if (current.checkOutPhotoPath != null) {
+          current = await _stepUploadCheckoutPhoto(current);
+          if (current.status == FichajeQueueStatus.failed) return;
+        }
+        // else: resting — salida not yet captured, do nothing.
+      }
+
+      // ── Step 4: POST check-out ────────────────────────────────────────────
+      if (current.status == FichajeQueueStatus.salidaSigned) {
         await _stepCheckOut(current);
       }
     } catch (_) {
@@ -199,6 +236,7 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
         capturedAt: item.checkInCapturedAt,
         position: item.checkInGps,
         clientRef: item.clientRef,
+        verification: item.checkInVerification,
       );
 
       await _queue.markCheckedIn(
@@ -207,22 +245,33 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
       );
       return item.copyWith(
         serverAttendanceId: record.id,
-        status: FichajeQueueStatus.checkedInPendingSignature,
+        status: FichajeQueueStatus.checkedIn,
       );
     } on AttendanceException catch (e) {
-      // 409 = duplicate → the check-in already exists server-side.
-      // Attempt to recover the server attendance ID via GET.
-      if (e.message.contains('ya tiene un registro')) {
+      // Classify by HTTP status code (Fix 3/4/12 — not by message substring).
+      final status = e.statusCode;
+
+      if (status == 409) {
+        // Duplicate → the check-in already exists server-side.
+        // Attempt to recover the server attendance ID via GET.
         return await _recoverCheckIn(item);
       }
-      // Other attendance error — mark failed (non-transient business error).
+
+      if (status == null || status >= 500) {
+        // Network error or server fault → TRANSIENT: leave pending for retry.
+        return item;
+      }
+
+      // 4xx (422 AttendanceDateMismatchError, 400, etc.) → terminal failure.
+      // Fix 6/11: date-mismatch is treated as terminal with the REAL backend
+      // message. Full clock-skew detection (NTP) is out of scope.
       await _queue.markFailed(localId: item.localId, reason: e.message);
       return item.copyWith(
         status: FichajeQueueStatus.failed,
         failureReason: e.message,
       );
     } catch (_) {
-      // Network error — leave as pendingCheckIn and retry next cycle.
+      // Unexpected non-AttendanceException → leave pending for retry.
       return item;
     }
   }
@@ -233,40 +282,92 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
     try {
       final record = await _remote.recoverByClientRef(item.clientRef);
       if (record != null) {
+        // Our own check-in actually succeeded (the response was lost) — link
+        // the server id and continue the flow.
         await _queue.markCheckedIn(
           localId: item.localId,
           serverAttendanceId: record.id,
         );
         return item.copyWith(
           serverAttendanceId: record.id,
-          status: FichajeQueueStatus.checkedInPendingSignature,
+          status: FichajeQueueStatus.checkedIn,
         );
       }
+
+      // The GET returned an empty result (null) — the record was NOT found with
+      // our clientRef. This could mean:
+      //  a) A genuine duplicate: a DIFFERENT check-in owns today's slot.
+      //  b) A GET lag: the server committed the row but the read replica hasn't
+      //     caught up yet.
+      //
+      // Fix 5: leave the item PENDING instead of marking it failed immediately.
+      // The next sync cycle will retry. A true duplicate will eventually be
+      // confirmed once the server read is consistent. This prevents destroying
+      // real check-ins due to transient read-after-write lag.
+      return item;
+    } on AttendanceException catch (e) {
+      // recoverByClientRef rethrows non-404 errors as AttendanceException with
+      // statusCode (Fix 10). Treat as TRANSIENT — leave pending for retry.
+      final status = e.statusCode;
+      if (status == null || status >= 500) {
+        return item;
+      }
+      // 401 or other 4xx → also leave pending; session recovery handles 401.
+      return item;
     } catch (_) {
-      // Recovery request itself failed; retry next cycle.
+      // Network error — leave as pendingCheckIn and retry next cycle.
+      return item;
     }
-    // Could not recover — leave as pendingCheckIn.
-    return item;
   }
 
-  Future<PendingFichaje> _stepUploadSignature(PendingFichaje item) async {
+  Future<PendingFichaje> _stepUploadCheckinPhoto(
+    PendingFichaje item,
+  ) async {
     final serverId = item.serverAttendanceId;
-    final sigPath = item.signaturePngPath;
+    final photoPath = item.checkInPhotoPath;
 
-    // If no signature captured yet, the supervisor hasn't drawn it offline —
-    // nothing to upload. Leave in checkedInPendingSignature.
-    if (sigPath == null || serverId == null) return item;
+    // No entry photo yet — supervisor hasn't captured it offline.
+    if (photoPath == null || serverId == null) return item;
 
     try {
-      final bytes = await File(sigPath).readAsBytes();
-      await _remote.uploadSignature(
+      final bytes = await File(photoPath).readAsBytes();
+      await _remote.uploadPhoto(
         attendanceId: serverId,
-        signaturePngBytes: bytes.toList(),
+        photoBytes: bytes.toList(),
+        phase: 'checkin',
       );
-      await _queue.markSignatureUploaded(localId: item.localId);
-      return item.copyWith(status: FichajeQueueStatus.signedPendingCheckOut);
+      await _queue.markIngresoComplete(localId: item.localId);
+      return item.copyWith(status: FichajeQueueStatus.ingresoComplete);
     } on AttendanceException catch (e) {
-      // Non-transient → mark failed.
+      await _queue.markFailed(localId: item.localId, reason: e.message);
+      return item.copyWith(
+        status: FichajeQueueStatus.failed,
+        failureReason: e.message,
+      );
+    } catch (_) {
+      // Network error — retry next cycle.
+      return item;
+    }
+  }
+
+  Future<PendingFichaje> _stepUploadCheckoutPhoto(
+    PendingFichaje item,
+  ) async {
+    final serverId = item.serverAttendanceId;
+    final photoPath = item.checkOutPhotoPath;
+
+    if (photoPath == null || serverId == null) return item;
+
+    try {
+      final bytes = await File(photoPath).readAsBytes();
+      await _remote.uploadPhoto(
+        attendanceId: serverId,
+        photoBytes: bytes.toList(),
+        phase: 'checkout',
+      );
+      await _queue.markSalidaSigned(localId: item.localId);
+      return item.copyWith(status: FichajeQueueStatus.salidaSigned);
+    } on AttendanceException catch (e) {
       await _queue.markFailed(localId: item.localId, reason: e.message);
       return item.copyWith(
         status: FichajeQueueStatus.failed,
@@ -284,8 +385,11 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
     final checkOutAt = item.checkOutCapturedAt;
     final checkOutGps = item.checkOutGps;
 
-    // No check-out data yet — supervisor hasn't triggered it offline.
-    if (serverId == null || checkOutRef == null || checkOutAt == null ||
+    // No check-out data yet — this shouldn't happen when status==salidaSigned
+    // but guard defensively.
+    if (serverId == null ||
+        checkOutRef == null ||
+        checkOutAt == null ||
         checkOutGps == null) {
       return;
     }
@@ -296,16 +400,21 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
         capturedAt: checkOutAt,
         position: checkOutGps,
         checkOutClientRef: checkOutRef,
+        verification: item.checkOutVerification,
       );
       await _queue.markCompleted(localId: item.localId);
     } on AttendanceException catch (e) {
-      if (e.message.contains('firma')) {
-        // 422 SignatureRequired — shouldn't happen (we check step ordering)
-        // but retry after re-uploading signature next cycle.
-        // Reset to checkedInPendingSignature so we retry upload first.
-        // We do this by leaving current status as-is and NOT marking failed.
+      // Classify by HTTP status code (Fix 3/4 — mirrors _stepCheckIn logic).
+      final status = e.statusCode;
+
+      if (status == null || status >= 500) {
+        // TRANSIENT — leave item in salidaSigned and retry next cycle.
         return;
       }
+
+      // 4xx → terminal failure with the REAL backend message.
+      // This correctly surfaces PhotoRequiredError, InvalidShiftDurationError,
+      // or any other 422 with its actual Spanish description.
       await _queue.markFailed(localId: item.localId, reason: e.message);
     } catch (_) {
       // Network error — retry next cycle.
@@ -320,7 +429,8 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
         .where(
           (f) =>
               f.status != FichajeQueueStatus.completed &&
-              f.status != FichajeQueueStatus.failed,
+              f.status != FichajeQueueStatus.failed &&
+              f.status != FichajeQueueStatus.ingresoComplete,
         )
         .length;
     final failed =
@@ -334,4 +444,3 @@ class FichajeSyncService extends StateNotifier<SyncStats> {
     super.dispose();
   }
 }
-

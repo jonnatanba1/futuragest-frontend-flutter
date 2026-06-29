@@ -1,7 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../../core/biometric/biometric_service.dart';
+import '../../../core/biometric/biometric_service.dart'
+    show BiometricException, BiometricOutcome, BiometricResult, BiometricService, VerificationMethod;
 import '../../../core/location/location_service.dart'
     as core_location show LocationException;
 import '../../../core/location/location_service.dart' show LocationService;
@@ -9,78 +10,133 @@ import '../domain/attendance_record.dart';
 import '../domain/attendance_repository.dart';
 import '../domain/gps_position.dart';
 import '../domain/operario.dart';
+import '../domain/ports/fichaje_queue_repository.dart'
+    show DuplicateLocalFichajeException;
 import 'attendance_providers.dart';
 import 'fichaje_state.dart';
 import 'fichaje_sync_service.dart';
 
 const _uuid = Uuid();
 
-/// Drives the per-operario fichaje flow.
+/// Parameters that identify a fichaje session for the [FichajeController]
+/// family provider.
 ///
-/// STEP 2 changes vs STEP 1:
-///  - Each commit action (checkIn, checkOut) is now gated behind a biometric
-///    confirmation via [BiometricService].
-///  - The intent is written to the offline queue FIRST via [FichajeSyncService]
-///    before any network call. Sync service handles the actual POSTs.
-///  - UI state advances optimistically after the queue write succeeds. When
-///    offline the supervisor can still complete the full flow (GPS + signature
-///    + check-out captured locally); the sync service replays when online.
-///  - The state machine transitions are identical to STEP 1 — screen code
-///    needed minimal changes (pending-offline badge only).
+/// [mode] determines which flow runs:
+///   - [FichajeMode.ingreso]: biometric → GPS → enqueue → entry photo → done.
+///   - [FichajeMode.salida]: biometric → GPS → exit photo → saveSalida → done.
+///
+/// For salida mode, [localQueueId] identifies the queue row created at ingreso.
+/// [serverAttendanceId] may be null if the ingreso hasn't synced yet — salida
+/// is still captured offline and replay sequences correctly.
+class FichajeParams {
+  const FichajeParams({
+    required this.operario,
+    required this.mode,
+    this.localQueueId,
+    this.serverAttendanceId,
+  });
+
+  final Operario operario;
+  final FichajeMode mode;
+  final int? localQueueId;
+  final String? serverAttendanceId;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is FichajeParams &&
+          operario.id == other.operario.id &&
+          mode == other.mode &&
+          localQueueId == other.localQueueId;
+
+  @override
+  int get hashCode => Object.hash(operario.id, mode, localQueueId);
+}
+
+/// Drives the per-operario fichaje flow (ingreso or salida).
+///
+/// INGRESO flow:
+///   checkIn() → biometric → GPS → enqueue → FichajeAwaitingPhoto(mode:ingreso)
+///   uploadPhoto(photoBytes) → saveCheckInPhoto → FichajeDone(mode:ingreso)
+///
+/// SALIDA flow:
+///   startSalidaFlow() → biometric → GPS → FichajeAwaitingPhoto(mode:salida)
+///   uploadPhoto(photoBytes) → saveSalida → FichajeDone(mode:salida)
 class FichajeController extends StateNotifier<FichajeState> {
   FichajeController({
-    required Operario operario,
-    required FichajeSyncService syncService,
-    required BiometricService biometric,
-  })  : _syncService = syncService, // ignore: prefer_initializing_formals
-        _biometric = biometric, // ignore: prefer_initializing_formals
-        super(FichajeIdle(operario));
+    required FichajeParams params,
+    required this._syncService,
+    required this._biometric,
+  })  : _params = params,
+        super(FichajeIdle(params.operario));
 
+  final FichajeParams _params;
   final FichajeSyncService _syncService;
   final BiometricService _biometric;
 
-  // Tracks the local queue row ID for this fichaje session.
+  // Tracks the local queue row ID for this session.
   int? _localId;
+  // Data captured during the salida biometric+GPS step.
+  // Cleared on reset/abort to prevent stale data leaking into a later attempt.
+  GpsPosition? _salidaGps;
+  DateTime? _salidaCapturedAt;
+  String? _salidaVerification;
+
+  Operario get _operario => _params.operario;
 
   // ── Biometric gate ─────────────────────────────────────────────────────────
 
-  /// Returns [true] to proceed, [false] if cancelled.
-  /// Throws [AttendanceException] on lockout.
-  Future<bool> _confirmBiometric(String reason) async {
+  /// Asks the user to confirm identity and returns the [BiometricOutcome].
+  ///
+  /// Returns the outcome to callers so they can:
+  ///   - check [BiometricOutcome.result] to decide whether to proceed, and
+  ///   - read [BiometricOutcome.verification] for the audit label.
+  ///
+  /// Throws [AttendanceException] on unrecoverable platform errors.
+  Future<BiometricOutcome> _confirmBiometric(String reason) async {
     try {
-      final result = await _biometric.confirm(reason);
-      return switch (result) {
-        BiometricResult.authenticated => true,
-        BiometricResult.cancelled => false,
-        // Device has no biometric — service has set requireBiometric=false.
-        BiometricResult.unavailable => true,
-      };
+      return await _biometric.confirm(reason);
     } on BiometricException catch (e) {
       throw AttendanceException(e.message);
     }
   }
 
-  // ── Check-in ───────────────────────────────────────────────────────────────
+  // ── Entry point ────────────────────────────────────────────────────────────
+
+  /// Starts the appropriate flow based on [FichajeParams.mode].
+  Future<void> start() async {
+    if (_params.mode == FichajeMode.ingreso) {
+      await checkIn();
+    } else {
+      await startSalidaFlow();
+    }
+  }
+
+  // ── INGRESO flow ───────────────────────────────────────────────────────────
 
   Future<void> checkIn() async {
     final current = state;
     if (current is! FichajeIdle) return;
-    final operario = current.operario;
 
-    state = FichajeCheckingIn(operario);
+    state = FichajeCheckingIn(_operario);
 
     try {
-      // 1. Biometric gate (before any write).
-      final ok = await _confirmBiometric(
-        'Confirmá tu identidad para registrar la entrada de ${operario.fullName}.',
+      // 1. Biometric gate.
+      final outcome = await _confirmBiometric(
+        'Confirmá tu identidad para registrar la entrada de ${_operario.fullName}.',
       );
-      if (!ok) {
+      if (outcome.result == BiometricResult.cancelled) {
         state = FichajeError(
           message: 'Autenticación biométrica cancelada.',
-          previous: FichajeIdle(operario),
+          previous: FichajeIdle(_operario),
         );
         return;
       }
+      // unavailable → degrade gracefully; label = NONE.
+      final checkInVerification =
+          outcome.result == BiometricResult.unavailable
+              ? VerificationMethod.none
+              : outcome.verification;
 
       // 2. GPS.
       final corePos = await LocationService.getCurrentPosition();
@@ -102,21 +158,20 @@ class FichajeController extends StateNotifier<FichajeState> {
 
       // 4. Write to offline queue FIRST; sync handles the POST.
       final queued = await _syncService.enqueue(
-        operarioId: operario.id,
-        operarioName: operario.fullName,
+        operarioId: _operario.id,
+        operarioName: _operario.fullName,
         date: date,
         clientRef: clientRef,
         checkInCapturedAt: capturedAt,
         checkInGps: pos,
+        checkInVerification: checkInVerification,
       );
       _localId = queued.localId;
 
       // 5. Provisional AttendanceRecord so the screen can continue.
-      //    The server ID will be empty until sync succeeds; the queue localId
-      //    is used as the routing key for subsequent steps.
       final provisionalRecord = AttendanceRecord(
         id: queued.serverAttendanceId ?? '',
-        operarioId: operario.id,
+        operarioId: _operario.id,
         date: date,
         clientRef: clientRef,
         checkInCapturedAt: capturedAt,
@@ -125,98 +180,55 @@ class FichajeController extends StateNotifier<FichajeState> {
         checkInAccuracy: pos.accuracy,
       );
 
-      state = FichajeAwaitingSignature(
-        operario: operario,
+      state = FichajeAwaitingPhoto(
+        operario: _operario,
+        mode: FichajeMode.ingreso,
         record: provisionalRecord,
         localQueueId: queued.localId,
         isOffline: queued.serverAttendanceId == null,
       );
+    } on DuplicateLocalFichajeException {
+      state = FichajeError(
+        message: 'Este operario ya tiene un ingreso registrado para hoy en este dispositivo.',
+        previous: FichajeIdle(_operario),
+      );
     } on core_location.LocationException catch (e) {
-      state = FichajeError(message: e.message, previous: FichajeIdle(operario));
+      state = FichajeError(message: e.message, previous: FichajeIdle(_operario));
     } on AttendanceException catch (e) {
-      state = FichajeError(message: e.message, previous: FichajeIdle(operario));
+      state = FichajeError(message: e.message, previous: FichajeIdle(_operario));
     } catch (e) {
       state = FichajeError(
         message: 'Error inesperado: $e',
-        previous: FichajeIdle(operario),
+        previous: FichajeIdle(_operario),
       );
     }
   }
 
-  // ── Signature upload ───────────────────────────────────────────────────────
+  // ── SALIDA flow ────────────────────────────────────────────────────────────
 
-  Future<void> uploadSignature(List<int> pngBytes) async {
+  Future<void> startSalidaFlow() async {
     final current = state;
-    if (current is! FichajeAwaitingSignature) return;
+    if (current is! FichajeIdle) return;
 
-    final operario = current.operario;
-    final record = current.record;
-    final localId = current.localQueueId ?? _localId;
-    state = FichajeUploadingSignature(operario: operario, record: record);
-
-    try {
-      if (localId != null) {
-        // Persist PNG to disk via queue; sync will upload to backend.
-        await _syncService.saveSignature(
-          localId: localId,
-          pngBytes: pngBytes,
-        );
-      }
-
-      final updatedRecord = record.copyWith(signatureUploaded: true);
-      state = FichajeSignatureDone(
-        operario: operario,
-        record: updatedRecord,
-        localQueueId: localId,
-      );
-    } on AttendanceException catch (e) {
-      state = FichajeError(
-        message: e.message,
-        previous: FichajeAwaitingSignature(
-          operario: operario,
-          record: record,
-          localQueueId: localId,
-        ),
-      );
-    } catch (e) {
-      state = FichajeError(
-        message: 'Error inesperado al guardar la firma: $e',
-        previous: FichajeAwaitingSignature(
-          operario: operario,
-          record: record,
-          localQueueId: localId,
-        ),
-      );
-    }
-  }
-
-  // ── Check-out ──────────────────────────────────────────────────────────────
-
-  Future<void> checkOut() async {
-    final current = state;
-    if (current is! FichajeSignatureDone) return;
-
-    final operario = current.operario;
-    final record = current.record;
-    final localId = current.localQueueId ?? _localId;
-    state = FichajeCheckingOut(operario: operario, record: record);
+    state = FichajeCheckingIn(_operario);
 
     try {
       // 1. Biometric gate.
-      final ok = await _confirmBiometric(
-        'Confirmá tu identidad para registrar la salida de ${operario.fullName}.',
+      final outcome = await _confirmBiometric(
+        'Confirmá tu identidad para registrar la salida de ${_operario.fullName}.',
       );
-      if (!ok) {
+      if (outcome.result == BiometricResult.cancelled) {
         state = FichajeError(
           message: 'Autenticación biométrica cancelada.',
-          previous: FichajeSignatureDone(
-            operario: operario,
-            record: record,
-            localQueueId: localId,
-          ),
+          previous: FichajeIdle(_operario),
         );
         return;
       }
+      // unavailable → degrade gracefully; label = NONE.
+      final checkOutVerification =
+          outcome.result == BiometricResult.unavailable
+              ? VerificationMethod.none
+              : outcome.verification;
 
       // 2. GPS.
       final corePos = await LocationService.getCurrentPosition();
@@ -225,74 +237,154 @@ class FichajeController extends StateNotifier<FichajeState> {
         longitude: corePos.longitude,
         accuracy: corePos.accuracy,
       );
+      _salidaGps = pos;
+      _salidaCapturedAt = DateTime.now().toUtc();
+      _salidaVerification = checkOutVerification;
 
-      final capturedAt = DateTime.now().toUtc();
-      final checkOutClientRef = _uuid.v4();
+      // 3. Resolve the local queue row. The caller provides localQueueId if
+      //    they looked it up via findOpenByOperarioAndDate.
+      _localId = _params.localQueueId;
 
-      // 3. Save check-out intent to queue; sync handles the POST.
-      if (localId != null) {
-        await _syncService.saveCheckOut(
-          localId: localId,
-          checkOutClientRef: checkOutClientRef,
-          checkOutCapturedAt: capturedAt,
-          checkOutGps: pos,
-        );
-      }
-
-      // 4. Advance UI optimistically.
-      final completedRecord = record.copyWith(
-        checkOutCapturedAt: capturedAt,
-        checkOutLat: pos.latitude,
-        checkOutLng: pos.longitude,
-        checkOutAccuracy: pos.accuracy,
+      state = FichajeAwaitingPhoto(
+        operario: _operario,
+        mode: FichajeMode.salida,
+        localQueueId: _localId,
+        // The salida is always "offline-capable" — show badge if no server id.
+        isOffline: _params.serverAttendanceId == null,
       );
-
-      state = FichajeDone(operario: operario, record: completedRecord);
     } on core_location.LocationException catch (e) {
-      state = FichajeError(
-        message: e.message,
-        previous: FichajeSignatureDone(
-          operario: operario,
-          record: record,
-          localQueueId: localId,
-        ),
-      );
+      state = FichajeError(message: e.message, previous: FichajeIdle(_operario));
     } on AttendanceException catch (e) {
-      state = FichajeError(
-        message: e.message,
-        previous: FichajeSignatureDone(
-          operario: operario,
-          record: record,
-          localQueueId: localId,
-        ),
-      );
+      state = FichajeError(message: e.message, previous: FichajeIdle(_operario));
     } catch (e) {
       state = FichajeError(
         message: 'Error inesperado: $e',
-        previous: FichajeSignatureDone(
-          operario: operario,
-          record: record,
-          localQueueId: localId,
-        ),
+        previous: FichajeIdle(_operario),
       );
     }
+  }
+
+  // ── Shared: photo upload ───────────────────────────────────────────────────
+
+  /// Routes to the correct save method depending on the current mode.
+  Future<void> uploadPhoto(List<int> photoBytes) async {
+    final current = state;
+    if (current is! FichajeAwaitingPhoto) return;
+
+    final localId = current.localQueueId ?? _localId;
+    state = FichajeUploadingPhoto(operario: _operario);
+
+    try {
+      if (current.mode == FichajeMode.ingreso) {
+        await _saveIngresoPhoto(localId, photoBytes, current);
+      } else {
+        await _saveSalidaPhoto(localId, photoBytes, current);
+      }
+    } on AttendanceException catch (e) {
+      state = FichajeError(
+        message: e.message,
+        previous: current,
+      );
+    } catch (e) {
+      state = FichajeError(
+        message: 'Error inesperado al guardar la foto: $e',
+        previous: current,
+      );
+    }
+  }
+
+  Future<void> _saveIngresoPhoto(
+    int? localId,
+    List<int> photoBytes,
+    FichajeAwaitingPhoto prev,
+  ) async {
+    if (localId != null) {
+      await _syncService.saveCheckInPhoto(
+        localId: localId,
+        photoBytes: photoBytes,
+      );
+    }
+
+    state = FichajeDone(
+      operario: _operario,
+      mode: FichajeMode.ingreso,
+      serverAttendanceId: prev.record?.id.isNotEmpty == true
+          ? prev.record!.id
+          : null,
+    );
+  }
+
+  Future<void> _saveSalidaPhoto(
+    int? localId,
+    List<int> photoBytes,
+    FichajeAwaitingPhoto prev,
+  ) async {
+    final capturedAt = _salidaCapturedAt ?? DateTime.now().toUtc();
+    final gps = _salidaGps;
+
+    if (localId != null && gps != null) {
+      await _syncService.saveSalida(
+        localId: localId,
+        checkOutPhotoBytes: photoBytes,
+        checkOutClientRef: _uuid.v4(),
+        checkOutCapturedAt: capturedAt,
+        checkOutGps: gps,
+        checkOutVerification: _salidaVerification,
+      );
+    } else if (localId == null) {
+      // No local row AND no server ID — same-device assumption violated.
+      // The caller (operario list) should have already shown the SnackBar;
+      // this branch is a safety net.
+      // TODO(cross-device-salida): support salida from a different device.
+      state = FichajeError(
+        message: 'No se encontró el ingreso en este dispositivo.',
+        previous: prev,
+      );
+      return;
+    }
+
+    state = FichajeDone(
+      operario: _operario,
+      mode: FichajeMode.salida,
+      serverAttendanceId: _params.serverAttendanceId,
+    );
   }
 
   // ── Retry ──────────────────────────────────────────────────────────────────
 
-  void retry() {
+  /// Resets to the previous state (typically [FichajeIdle]) and restarts the
+  /// flow so biometric + GPS are re-prompted on the next attempt.
+  ///
+  /// This fixes the dead-end where calling [retry()] alone just reset to Idle
+  /// without re-triggering [start()], leaving the user stuck on a blank spinner.
+  Future<void> retry() async {
     final current = state;
-    if (current is FichajeError) {
-      state = current.previous;
+    if (current is! FichajeError) return;
+    _clearSalidaFields();
+    state = current.previous;
+    // Re-start only if we landed back on FichajeIdle; any other previous state
+    // (e.g. FichajeAwaitingPhoto from an upload error) doesn't need a restart.
+    if (state is FichajeIdle) {
+      await start();
     }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  /// Clears salida-phase ephemeral fields so a subsequent flow attempt cannot
+  /// accidentally reuse GPS or verification data from an aborted salida.
+  void _clearSalidaFields() {
+    _salidaGps = null;
+    _salidaCapturedAt = null;
+    _salidaVerification = null;
   }
 }
 
-/// Family provider — one [FichajeController] per operario.
+/// Family provider — one [FichajeController] per [FichajeParams].
 final fichajeControllerProvider = StateNotifierProviderFamily<
-    FichajeController, FichajeState, Operario>(
-  (ref, operario) => FichajeController(
-    operario: operario,
+    FichajeController, FichajeState, FichajeParams>(
+  (ref, params) => FichajeController(
+    params: params,
     syncService: ref.watch(fichajeSyncServiceProvider.notifier),
     biometric: ref.watch(biometricServiceProvider),
   ),

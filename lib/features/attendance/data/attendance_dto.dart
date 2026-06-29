@@ -20,7 +20,7 @@ Operario operarioFromJson(Map<String, dynamic> json) {
 ///
 /// The backend response shape for check-in:
 ///   { id, operarioId, date, clientRef, checkInCapturedAt, checkInLat,
-///     checkInLng, checkInAccuracy?, signatureUrl?, completedAt?, ... }
+///     checkInLng, checkInAccuracy?, checkInPhotoKey?, completedAt?, ... }
 AttendanceRecord attendanceRecordFromJson(
   Map<String, dynamic> json, {
   required String clientRef,
@@ -48,8 +48,8 @@ AttendanceRecord attendanceRecordFromJson(
     checkInAccuracy: json['checkInAccuracy'] != null
         ? (json['checkInAccuracy'] as num).toDouble()
         : null,
-    // signatureUploaded is inferred from signatureUrl presence in the response.
-    signatureUploaded: json['signatureUrl'] != null,
+    // photoUploaded is inferred from checkInPhotoKey presence in the response.
+    photoUploaded: json['checkInPhotoKey'] != null,
     checkOutCapturedAt: checkOutCapturedAt,
     checkOutLat: json['checkOutLat'] != null
         ? (json['checkOutLat'] as num).toDouble()

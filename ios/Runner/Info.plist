@@ -10,12 +10,16 @@
 	<key>NSFaceIDUsageDescription</key>
 	<string>FuturaGest usa Face ID para confirmar tu identidad al registrar asistencia.</string>
 
+	<!-- Camera permission required to capture the operario photo at check-in and check-out -->
+	<key>NSCameraUsageDescription</key>
+	<string>Se usa la cámara para tomar la foto del operario al registrar ingreso y salida.</string>
+
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Futuragest Mobile</string>
+	<string>FuturaGest</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

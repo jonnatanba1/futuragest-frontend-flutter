@@ -27,8 +27,11 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
           .map(operarioFromJson)
           .toList();
     } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      final backendMessage = _extractMessage(e.response?.data);
       throw AttendanceException(
-        'No se pudo cargar la lista de operarios: ${e.message}',
+        backendMessage ?? 'No se pudo cargar la lista de operarios: ${e.message}',
+        statusCode: status,
       );
     }
   }
@@ -42,6 +45,7 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
     required DateTime capturedAt,
     required GpsPosition position,
     required String clientRef,
+    String? verification,
   }) async {
     try {
       final response = await dio.post<Map<String, dynamic>>(
@@ -52,49 +56,53 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
           'checkInCapturedAt': capturedAt.toUtc().toIso8601String(),
           'checkInLat': position.latitude,
           'checkInLng': position.longitude,
-          if (position.accuracy != null)
-            'checkInAccuracy': position.accuracy,
+          if (position.accuracy != null) 'checkInAccuracy': position.accuracy,
           'clientRef': clientRef,
+          // AUDIT LABEL ONLY — no authorization logic may depend on this field.
+          'verification': ?verification,
         },
       );
 
       return attendanceRecordFromJson(response.data!, clientRef: clientRef);
     } on DioException catch (e) {
       final status = e.response?.statusCode;
-      if (status == 409) {
-        throw const AttendanceException(
-          'Este operario ya tiene un registro de entrada para hoy.',
-        );
-      }
+      // Extract the backend's own message from the response body when present.
+      final backendMessage = _extractMessage(e.response?.data);
       throw AttendanceException(
-        'Error al registrar la entrada: ${e.message}',
+        backendMessage ?? 'Error al registrar la entrada: ${e.message}',
+        statusCode: status,
       );
     }
   }
 
-  // ── Signature upload ───────────────────────────────────────────────────────
+  // ── Photo upload ───────────────────────────────────────────────────────────
 
   @override
-  Future<void> uploadSignature({
+  Future<void> uploadPhoto({
     required String attendanceId,
-    required List<int> signaturePngBytes,
+    required List<int> photoBytes,
+    required String phase,
   }) async {
     try {
       final formData = FormData.fromMap({
         'file': MultipartFile.fromBytes(
-          signaturePngBytes,
-          filename: 'signature.png',
-          contentType: DioMediaType('image', 'png'),
+          photoBytes,
+          filename: 'photo.jpg',
+          contentType: DioMediaType('image', 'jpeg'),
         ),
       });
 
       await dio.post<void>(
-        '/asistencia/$attendanceId/signature',
+        '/asistencia/$attendanceId/photo',
+        queryParameters: {'phase': phase},
         data: formData,
       );
     } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      final backendMessage = _extractMessage(e.response?.data);
       throw AttendanceException(
-        'No se pudo subir la firma: ${e.message}',
+        backendMessage ?? 'No se pudo subir la foto: ${e.message}',
+        statusCode: status,
       );
     }
   }
@@ -107,6 +115,7 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
     required DateTime capturedAt,
     required GpsPosition position,
     required String checkOutClientRef,
+    String? verification,
   }) async {
     try {
       final response = await dio.post<Map<String, dynamic>>(
@@ -115,9 +124,10 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
           'checkOutCapturedAt': capturedAt.toUtc().toIso8601String(),
           'checkOutLat': position.latitude,
           'checkOutLng': position.longitude,
-          if (position.accuracy != null)
-            'checkOutAccuracy': position.accuracy,
+          if (position.accuracy != null) 'checkOutAccuracy': position.accuracy,
           'checkOutClientRef': checkOutClientRef,
+          // AUDIT LABEL ONLY — no authorization logic may depend on this field.
+          'verification': ?verification,
         },
       );
 
@@ -134,13 +144,14 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
       return attendanceRecordFromJson(data, clientRef: clientRefFromServer);
     } on DioException catch (e) {
       final status = e.response?.statusCode;
-      if (status == 422) {
-        throw const AttendanceException(
-          'Debe subir la firma del operario antes de registrar la salida.',
-        );
-      }
+      // Forward the backend's own error message. Do NOT hardcode 422 as
+      // "photo missing" — the backend may send InvalidShiftDurationError,
+      // AttendanceDateMismatchError, or PhotoRequiredError; each has a
+      // distinct Spanish message that must be surfaced verbatim (Fixes 3+4+12).
+      final backendMessage = _extractMessage(e.response?.data);
       throw AttendanceException(
-        'Error al registrar la salida: ${e.message}',
+        backendMessage ?? 'Error al registrar la salida: ${e.message}',
+        statusCode: status,
       );
     }
   }
@@ -156,12 +167,71 @@ class AttendanceRepositoryImpl implements AttendanceRepository {
       );
       final list = response.data ?? [];
       if (list.isEmpty) return null;
-      final json = list.first as Map<String, dynamic>;
-      return attendanceRecordFromJson(json, clientRef: clientRef);
-    } on DioException catch (_) {
-      // If the recovery request itself fails, return null so the sync
-      // service retries on the next cycle.
-      return null;
+      final jsonData = list.first as Map<String, dynamic>;
+      return attendanceRecordFromJson(jsonData, clientRef: clientRef);
+    } on DioException catch (e) {
+      final status = e.response?.statusCode;
+      // 404 (or empty list above) → record genuinely not found → return null
+      // so the caller can decide it's a true duplicate.
+      // Any other error (401, 5xx, network) → rethrow as AttendanceException
+      // with statusCode so the sync service treats it as TRANSIENT (Fix 10).
+      if (status == 404) return null;
+      final backendMessage = _extractMessage(e.response?.data);
+      throw AttendanceException(
+        backendMessage ?? 'Error al recuperar el registro: ${e.message}',
+        statusCode: status,
+      );
+    }
+  }
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  /// Extracts the human-readable `message` from a backend error response body.
+  ///
+  /// NestJS exception bodies use `{ "message": "...", "statusCode": N }` for
+  /// plain exceptions, or `{ "message": ["...", "..."] }` for validation
+  /// errors. Returns the first non-empty string found, or null.
+  static String? _extractMessage(dynamic body) {
+    if (body == null) return null;
+    if (body is Map<String, dynamic>) {
+      final msg = body['message'];
+      if (msg is String && msg.isNotEmpty) return msg;
+      if (msg is List && msg.isNotEmpty) {
+        final first = msg.first;
+        if (first is String && first.isNotEmpty) return first;
+      }
+    }
+    return null;
+  }
+
+  @override
+  Future<Map<String, ({String id, bool completed})>> todayAttendanceByOperario(
+    String date,
+  ) async {
+    try {
+      // Bound the query to today via ?since= (Colombia midnight as an instant),
+      // then filter by the authoritative `date` field client-side.
+      final response = await dio.get<List<dynamic>>(
+        '/asistencia',
+        queryParameters: {'since': '${date}T00:00:00-05:00'},
+      );
+      final list = response.data ?? [];
+      final byOperario = <String, ({String id, bool completed})>{};
+      for (final item in list) {
+        final json = item as Map<String, dynamic>;
+        if (json['date'] == date) {
+          byOperario[json['operarioId'] as String] = (
+            id: json['id'] as String,
+            // completed once the salida (check-out) was registered.
+            completed: json['completedAt'] != null,
+          );
+        }
+      }
+      return byOperario;
+    } on DioException catch (e) {
+      throw AttendanceException(
+        'No se pudieron cargar los registros de hoy: ${e.message}',
+      );
     }
   }
 }

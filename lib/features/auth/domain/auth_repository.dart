@@ -25,13 +25,19 @@ abstract interface class AuthRepository {
   ///
   /// Calls POST /auth/push-token → 204.
   /// Throws [AuthException] on 401 or 400.
-  ///
-  /// TODO(push): next slice — obtain the real FCM token via firebase_messaging
-  ///             and call this from a post-login hook.
   Future<void> registerPushToken({
     required String pushToken,
     String? pushPlatform,
   });
+
+  /// Clears the FCM push token for the caller's current device session.
+  ///
+  /// The device is resolved from the JWT — never from the body. Used on logout
+  /// so the backend stops targeting this device.
+  ///
+  /// Calls DELETE /auth/push-token → 204 (no body).
+  /// Throws [AuthException] on 401.
+  Future<void> unregisterPushToken();
 
   /// Changes the authenticated user's password.
   ///

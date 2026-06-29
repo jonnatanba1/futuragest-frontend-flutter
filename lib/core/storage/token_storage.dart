@@ -5,6 +5,9 @@ abstract class _Keys {
   static const accessToken = 'access_token';
   static const refreshToken = 'refresh_token';
   static const deviceId = 'device_id';
+  /// Stores the subject (userId) of the last authenticated user.
+  /// Used at login to detect a user switch and wipe the offline queue.
+  static const sessionOwner = 'session_owner';
 }
 
 /// Wraps [FlutterSecureStorage] to provide typed read/write/clear helpers
@@ -14,30 +17,75 @@ class TokenStorage {
 
   final FlutterSecureStorage _storage;
 
+  Future<String?> _safeRead(String key) async {
+    try {
+      return await _storage.read(key: key);
+    } catch (_) {
+      // If reading fails (usually BAD_DECRYPT), wipe storage.
+      // We must catch errors here too because deleteAll() can also throw.
+      try {
+        await _storage.deleteAll();
+      } catch (_) {}
+      return null;
+    }
+  }
+
+  Future<void> _safeWrite(String key, String value) async {
+    try {
+      await _storage.write(key: key, value: value);
+    } catch (_) {
+      try {
+        await _storage.deleteAll();
+      } catch (_) {}
+      
+      try {
+        await _storage.write(key: key, value: value);
+      } catch (_) {}
+    }
+  }
+
   // ── Access token ───────────────────────────────────────────────────────────
 
   Future<void> saveAccessToken(String token) =>
-      _storage.write(key: _Keys.accessToken, value: token);
+      _safeWrite(_Keys.accessToken, token);
 
-  Future<String?> readAccessToken() =>
-      _storage.read(key: _Keys.accessToken);
+  Future<String?> readAccessToken() => _safeRead(_Keys.accessToken);
 
   // ── Refresh token ──────────────────────────────────────────────────────────
 
   Future<void> saveRefreshToken(String token) =>
-      _storage.write(key: _Keys.refreshToken, value: token);
+      _safeWrite(_Keys.refreshToken, token);
 
-  Future<String?> readRefreshToken() =>
-      _storage.read(key: _Keys.refreshToken);
+  Future<String?> readRefreshToken() => _safeRead(_Keys.refreshToken);
 
   // ── Device ID ──────────────────────────────────────────────────────────────
 
   Future<void> saveDeviceId(String id) =>
-      _storage.write(key: _Keys.deviceId, value: id);
+      _safeWrite(_Keys.deviceId, id);
 
-  Future<String?> readDeviceId() => _storage.read(key: _Keys.deviceId);
+  Future<String?> readDeviceId() => _safeRead(_Keys.deviceId);
 
-  // ── Clear all ──────────────────────────────────────────────────────────────
+  // ── Session owner ──────────────────────────────────────────────────────────
 
-  Future<void> clearAll() => _storage.deleteAll();
+  Future<void> saveSessionOwner(String userId) =>
+      _safeWrite(_Keys.sessionOwner, userId);
+
+  Future<String?> readSessionOwner() => _safeRead(_Keys.sessionOwner);
+
+  // ── Clear session ──────────────────────────────────────────────────────────
+
+  /// Deletes auth-related keys (tokens + session owner) while PRESERVING
+  /// [_Keys.deviceId] so the stable device identifier survives logout and
+  /// session expiry. Use this everywhere instead of a blanket deleteAll().
+  Future<void> clearSession() async {
+    try {
+      await _storage.delete(key: _Keys.accessToken);
+      await _storage.delete(key: _Keys.refreshToken);
+      await _storage.delete(key: _Keys.sessionOwner);
+    } catch (_) {
+      try {
+        await _storage.deleteAll();
+      } catch (_) {}
+    }
+  }
 }

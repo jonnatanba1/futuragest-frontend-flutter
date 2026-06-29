@@ -6,7 +6,8 @@ import '../domain/novedad.dart';
 ///   { id, attendanceId, supervisorId, zoneId, horasExtra (string),
 ///     motivo (string|null), status ("PENDING"|"APPROVED"|"REJECTED"),
 ///     approvedByUserId (string|null), decidedAt (ISO|null),
-///     clientRef (string|null), createdAt (ISO), updatedAt (ISO) }
+///     clientRef (string|null), createdAt (ISO), updatedAt (ISO),
+///     tipoNovedad (string|null), minutosTarde (int|null) }
 Novedad novedadFromJson(Map<String, dynamic> json) {
   return Novedad(
     id: json['id'] as String,
@@ -23,6 +24,8 @@ Novedad novedadFromJson(Map<String, dynamic> json) {
         : null,
     clientRef: json['clientRef'] as String?,
     createdAt: DateTime.parse(json['createdAt'] as String),
+    tipoNovedad: json['tipoNovedad'] as String?,
+    minutosTarde: json['minutosTarde'] as int?,
   );
 }
 

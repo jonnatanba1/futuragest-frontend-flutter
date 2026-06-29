@@ -75,11 +75,20 @@ class LocationService {
         ),
       );
 
+      // Fix 8: reject mock/spoofed positions.
+      if (position.isMocked) {
+        throw const LocationException(
+          'Ubicación simulada detectada. Desactive las aplicaciones de GPS falso.',
+        );
+      }
+
       return GpsPosition(
         latitude: position.latitude,
         longitude: position.longitude,
         accuracy: position.accuracy,
       );
+    } on LocationException {
+      rethrow;
     } catch (e) {
       throw LocationException('No se pudo obtener la ubicación: $e');
     }
