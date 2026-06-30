@@ -102,19 +102,6 @@ class _OperarioListScreenState extends ConsumerState<OperarioListScreen> {
                 normalize(o.documento).contains(query);
           }).toList();
 
-          // Count stats based on filtered list
-          int presentes = 0, tardes = 0, ausentes = 0;
-          for (final op in filteredOperarios) {
-            final today = recordedToday[op.id];
-            if (today == null) {
-              ausentes++;
-            } else if (today.completed) {
-              presentes++;
-            } else {
-              tardes++;
-            }
-          }
-
           return Column(
             children: [
               // Top safe area spacer
@@ -190,33 +177,6 @@ class _OperarioListScreenState extends ConsumerState<OperarioListScreen> {
               ),
               const SizedBox(height: 16),
 
-              // Stats row
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20),
-                child: Row(
-                  children: [
-                    _StatCard(
-                      label: 'PRESENTES',
-                      count: presentes,
-                      color: const Color(0xFF005f48),
-                    ),
-                    const SizedBox(width: 10),
-                    _StatCard(
-                      label: 'TARDES',
-                      count: tardes,
-                      color: const Color(0xFFff8a00),
-                    ),
-                    const SizedBox(width: 10),
-                    _StatCard(
-                      label: 'AUSENTES',
-                      count: ausentes,
-                      color: const Color(0xFFba1a1a),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 16),
-
               // List
               Expanded(
                 child: _OperarioList(
@@ -278,51 +238,6 @@ class _OperarioListScreenState extends ConsumerState<OperarioListScreen> {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Stat card ──────────────────────────────────────────────────────────────
-
-class _StatCard extends StatelessWidget {
-  const _StatCard({required this.label, required this.count, required this.color});
-  final String label;
-  final int count;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color.withValues(alpha: 0.2)),
-        ),
-        child: Column(
-          children: [
-            Text(
-              '$count',
-              style: GoogleFonts.manrope(
-                fontSize: 28,
-                fontWeight: FontWeight.w800,
-                color: color,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: GoogleFonts.manrope(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-                color: color,
-              ),
-            ),
-          ],
         ),
       ),
     );
